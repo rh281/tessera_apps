@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must match the classifiers in pyproject.toml.
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      - name: Install
+        run: |
+          uv venv -p ${{ matrix.python }} .venv
+          uv pip install -p .venv -r requirements-lock.txt
+          uv pip install -p .venv --no-deps -e .
+      - name: Lockfile is current
+        if: matrix.python == '3.12'
+        run: |
+          # Starting from the committed lock keeps existing pins, so this fails only when pyproject.toml
+          # and the lock disagree, not whenever a dependency publishes a release.
+          cp requirements-lock.txt /tmp/lock.txt
+          uv pip compile pyproject.toml --all-extras --python-version 3.12 --no-header -q -o /tmp/lock.txt
+          diff requirements-lock.txt /tmp/lock.txt
+      - name: ruff
+        run: .venv/bin/ruff check src tests scripts && .venv/bin/ruff format --check src tests scripts
+      - name: mypy
+        run: .venv/bin/mypy src tests scripts
+      - name: pytest (offline)
+        run: .venv/bin/python -m pytest -q

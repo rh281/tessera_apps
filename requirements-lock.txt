@@ -1,0 +1,199 @@
+affine==3.0.1
+    # via rasterio
+annotated-doc==0.0.5
+    # via typer
+annotated-types==0.8.0
+    # via pydantic
+ast-serialize==0.13.0
+    # via mypy
+attrs==26.1.0
+    # via
+    #   affine
+    #   morecantile
+    #   rasterio
+certifi==2026.7.22
+    # via
+    #   pyogrio
+    #   pyproj
+    #   rasterio
+    #   requests
+charset-normalizer==3.5.2
+    # via requests
+click==8.5.0
+    # via
+    #   morecantile
+    #   rasterio
+    #   rio-cogeo
+cloudpickle==3.1.2
+    # via joblib
+contourpy==1.4.0
+    # via matplotlib
+cycler==0.12.1
+    # via matplotlib
+donfig==0.8.1.post1
+    # via zarr
+fonttools==4.67.0
+    # via matplotlib
+geopandas==1.2.0
+    # via tessera-apps (pyproject.toml)
+google-crc32c==1.9.0
+    # via zarr
+icechunk==2.3.0
+    # via tessera-apps (pyproject.toml)
+idna==3.20
+    # via requests
+iniconfig==2.3.1
+    # via pytest
+joblib==1.6.0
+    # via scikit-learn
+kiwisolver==1.5.1
+    # via matplotlib
+librt==0.16.0
+    # via mypy
+lxml==6.1.3
+    # via owslib
+markdown-it-py==4.2.0
+    # via rich
+matplotlib==3.11.2
+    # via tessera-apps (pyproject.toml)
+mdurl==0.1.2
+    # via markdown-it-py
+morecantile==7.1.0
+    # via rio-cogeo
+msgspec==0.22.0
+    # via zarr
+mypy==2.4.0
+    # via tessera-apps (pyproject.toml)
+mypy-extensions==1.1.0
+    # via mypy
+narwhals==2.27.1
+    # via scikit-learn
+numcodecs==0.17.0
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   zarr
+numpy==2.5.4
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   contourpy
+    #   geopandas
+    #   matplotlib
+    #   numcodecs
+    #   pandas
+    #   pcodec
+    #   pyogrio
+    #   rasterio
+    #   scikit-learn
+    #   scipy
+    #   shapely
+    #   xarray
+    #   zarr
+owslib==0.36.0
+    # via tessera-apps (pyproject.toml)
+packaging==26.3
+    # via
+    #   geopandas
+    #   matplotlib
+    #   pyogrio
+    #   pytest
+    #   xarray
+    #   zarr
+pandas==3.0.6
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geopandas
+    #   xarray
+pathspec==1.1.1
+    # via mypy
+pcodec==1.0.4
+    # via numcodecs
+pillow==12.3.0
+    # via matplotlib
+pluggy==1.6.0
+    # via pytest
+pyarrow==26.0.0
+    # via tessera-apps (pyproject.toml)
+pydantic==2.14.1
+    # via
+    #   morecantile
+    #   rio-cogeo
+pydantic-core==2.50.1
+    # via pydantic
+pygments==2.21.0
+    # via
+    #   pytest
+    #   rich
+pyogrio==0.13.0
+    # via geopandas
+pyparsing==3.3.3
+    # via
+    #   matplotlib
+    #   rasterio
+pyproj==3.8.0
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geopandas
+    #   morecantile
+pytest==9.1.1
+    # via tessera-apps (pyproject.toml)
+python-dateutil==2.9.0.post0
+    # via
+    #   matplotlib
+    #   owslib
+    #   pandas
+pyyaml==6.0.3
+    # via
+    #   donfig
+    #   owslib
+rasterio==1.5.2
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   rio-cogeo
+requests==2.34.2
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   owslib
+rich==15.0.0
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   typer
+rio-cogeo==7.0.4
+    # via tessera-apps (pyproject.toml)
+ruff==0.17.0
+    # via tessera-apps (pyproject.toml)
+scikit-learn==1.9.1
+    # via tessera-apps (pyproject.toml)
+scipy==1.18.1
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   scikit-learn
+shapely==2.2.0
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geopandas
+shellingham==1.5.4
+    # via typer
+six==1.17.0
+    # via python-dateutil
+threadpoolctl==3.7.0
+    # via scikit-learn
+typer==0.27.3
+    # via tessera-apps (pyproject.toml)
+typing-extensions==4.16.0
+    # via
+    #   mypy
+    #   numcodecs
+    #   pydantic
+    #   pydantic-core
+    #   typing-inspection
+    #   zarr
+typing-inspection==0.4.4
+    # via pydantic
+urllib3==2.8.0
+    # via requests
+xarray==2026.9.0
+    # via tessera-apps (pyproject.toml)
+zarr==3.4.1
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   icechunk

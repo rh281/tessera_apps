@@ -1,0 +1,48 @@
+line-length = 120
+target-version = "py312"
+force-exclude = true
+# Lint settings copied from dClimate/tessera-embeddings ruff.toml so code moves between the two repos cleanly.
+
+[format]
+quote-style = "double"
+indent-style = "space"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "D",    # pydocstyle
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+    "T20",  # flake8-print
+    "PTH",  # flake8-use-pathlib
+    "ARG",  # flake8-unused-arguments
+    "ANN",  # flake8-annotations
+]
+
+extend-select = ["E501", "PLE1205", "PLE1206"]
+
+ignore = [
+    "D100",   # Missing docstring in public module
+    "D104",   # Missing docstring in public package
+    "D107",   # Missing docstring in __init__
+    "D205",
+    "SIM105", # exception-handling style
+    "SIM108", # ternary-style suggestion
+]
+
+[lint.isort]
+known-first-party = ["tessera_apps"]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["ANN", "ARG", "RUF059", "F841", "D102", "D103", "N803", "N806", "C408"]
+"scripts/**/*.py" = ["T201"]

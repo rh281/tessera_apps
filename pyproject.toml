@@ -1,0 +1,70 @@
+[project]
+name = "tessera_apps"
+version = "0.1.0.dev0"
+description = "Climate applications on the TESSERA v1.1 global embeddings: wildfire, deforestation, wetland and restoration mapping"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+keywords = ["tessera", "embeddings", "remote-sensing", "climate", "wildfire", "deforestation", "mangrove"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    # Must match the CI matrix in .github/workflows/ci.yml.
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+# Floors follow docs/prebuild-survey.md (B1). The published store is in the Icechunk v2 repository
+# format, which icechunk 1.x cannot open, and sharded arrays inside Icechunk need a recent zarr.
+dependencies = [
+    "icechunk>=2.2,<3",
+    "zarr>=3.3",
+    # PCodec decodes the `scales` arrays in the Icechunk store.
+    "numcodecs[pcodec]>=0.16",
+    "numpy>=2.0",
+    "pyproj>=3.6",
+    "rasterio>=1.4.3",
+    "shapely>=2.0",
+    "xarray>=2025.1",
+    "geopandas>=1.0",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "scipy>=1.13",
+    "scikit-learn>=1.7.1",
+    "typer>=0.12",
+    "rich>=13",
+    "matplotlib>=3.9",
+]
+
+[project.optional-dependencies]
+# Loaders for the reference datasets in validate.py. None of them is a STAC source (survey S8).
+validate = ["requests>=2.32", "owslib>=0.31"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.15",
+    "mypy>=1.13",
+    "rio-cogeo>=5.4",
+]
+
+[project.scripts]
+tessera-apps = "tessera_apps.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tessera_apps"]
+
+[tool.hatch.build]
+# Bundled demo AOIs are GeoJSON. Listed as artifacts so no ignore rule can drop them from the
+# wheel or the sdist (survey B4).
+artifacts = ["src/tessera_apps/data/*.geojson"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "network: reads the live TESSERA store or a reference dataset over the network (deselected by default; run with -m network)",
+]
+addopts = "-m 'not network'"
