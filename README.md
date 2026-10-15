@@ -2,11 +2,11 @@
 
 Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global embeddings published by dClimate: 128-dimension, 10 m, annual (2017 to 2025) embeddings in an anonymous Icechunk store at `s3://tessera-embeddings/v1.1/dclimate.icechunk` (AWS `us-west-2`). No GPU, no model training beyond scikit-learn linear models.
 
-**Status: checkpoint 2 of the build brief (`io.py`, `metrics.py`, `export.py`, `validate.py`).** The four applications below are planned and not built yet. See `docs/checkpoints.md` for the checkpoint report and numbers.
+**Status: checkpoint 3 of the build brief.** `wildfire` is built; the other three applications are planned. See `docs/checkpoints.md` for the checkpoint report and numbers.
 
 | App | Question | Status |
 |---|---|---|
-| `wildfire` | Where did it burn, and how far has each burned pixel recovered? | planned |
+| `wildfire` | Where did it burn, and how far has each burned pixel recovered? | built, [notebook 01](notebooks/01_wildfire.ipynb) |
 | `deforest` | Where did forest become something else between two years? | planned |
 | `wetland` | Given a few known wetland locations, where else is that wetland, and how has it moved? | planned |
 | `restore` | Is a restoration site diverging from a matched control the way a working project should? | planned |
@@ -20,6 +20,16 @@ uv pip install -p .venv --no-deps -e .
 ```
 
 Python 3.12 or 3.13. No AWS credentials are needed. `tessera-apps info` opens the store and prints its snapshot and a zone's published years.
+
+## Wildfire
+
+Maps where it burned between two years and how far each burned pixel has recovered since. It takes the cosine distance between the year before and the year after the fire, sets an Otsu threshold (with a fallback when the distances are not bimodal), and cleans the burned mask to a minimum area. For every later year it measures each burned pixel's similarity to its own pre-fire vector, calibrated against nearby land that did not burn. With `--validate` it scores the burned mask against NIFC perimeters (US) or any `--reference` file.
+
+```bash
+tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --fire-name Caldor
+```
+
+This writes `out/wildfire_2020_2022.tif` (distance, burned and per-year recovery bands), two PCA false colour COGs, `wildfire_summary.parquet` and `.csv` (one row per year), `wildfire_preview.png`, `wildfire_report.json` and `wildfire_validation.json`. The Caldor demo reads about 23 GB and takes about 8 minutes outside us-west-2. See [notebook 01](notebooks/01_wildfire.ipynb) and `docs/checkpoints.md` for the results.
 
 ## Reading the store
 
@@ -57,7 +67,7 @@ What `io.py` takes care of:
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 507 offline tests, in-memory stores and a real 64 x 64 fixture
+.venv/bin/python -m pytest -q          # 629 offline tests, in-memory stores and a real 64 x 64 fixture
 .venv/bin/python -m pytest -m network  # live store and reference datasets (NIFC, EFFIS, Zenodo, USFS must be reachable)
 .venv/bin/ruff check src tests scripts && .venv/bin/mypy src tests scripts
 ```

@@ -6,11 +6,15 @@ annotated-types==0.8.0
     # via pydantic
 ast-serialize==0.13.0
     # via mypy
+asttokens==3.0.2
+    # via stack-data
 attrs==26.1.0
     # via
     #   affine
+    #   jsonschema
     #   morecantile
     #   rasterio
+    #   referencing
 certifi==2026.7.22
     # via
     #   pyogrio
@@ -23,12 +27,20 @@ click==8.5.0
     #   rio-cogeo
 cloudpickle==3.1.2
     # via joblib
+comm==0.2.3
+    # via ipykernel
 contourpy==1.4.0
     # via matplotlib
 cycler==0.12.1
     # via matplotlib
+debugpy==1.8.22
+    # via ipykernel
 donfig==0.8.1.post1
     # via zarr
+executing==2.3.0
+    # via stack-data
+fastjsonschema==2.22.2
+    # via nbformat
 fonttools==4.67.0
     # via matplotlib
 geopandas==1.2.0
@@ -39,8 +51,30 @@ icechunk==2.3.0
     # via tessera-apps (pyproject.toml)
 iniconfig==2.3.1
     # via pytest
+ipykernel==7.4.0
+    # via tessera-apps (pyproject.toml)
+ipython==9.17.1
+    # via ipykernel
+ipython-pygments-lexers==1.1.1
+    # via ipython
+jedi==0.20.1
+    # via ipython
 joblib==1.6.0
     # via scikit-learn
+jsonschema==4.26.0
+    # via nbformat
+jsonschema-specifications==2025.9.1
+    # via jsonschema
+jupyter-client==8.10.0
+    # via
+    #   ipykernel
+    #   nbclient
+jupyter-core==5.9.1
+    # via
+    #   ipykernel
+    #   jupyter-client
+    #   nbclient
+    #   nbformat
 kiwisolver==1.5.1
     # via matplotlib
 librt==0.16.0
@@ -49,6 +83,10 @@ markdown-it-py==4.2.0
     # via rich
 matplotlib==3.11.2
     # via tessera-apps (pyproject.toml)
+matplotlib-inline==0.2.2
+    # via
+    #   ipykernel
+    #   ipython
 mdurl==0.1.2
     # via markdown-it-py
 morecantile==7.1.0
@@ -61,6 +99,14 @@ mypy-extensions==1.1.0
     # via mypy
 narwhals==2.27.1
     # via scikit-learn
+nbclient==0.11.0
+    # via tessera-apps (pyproject.toml)
+nbformat==5.11.1
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   nbclient
+nest-asyncio2==1.7.4
+    # via ipykernel
 numcodecs==0.17.0
     # via
     #   tessera-apps (pyproject.toml)
@@ -84,6 +130,7 @@ numpy==2.5.4
 packaging==26.3
     # via
     #   geopandas
+    #   ipykernel
     #   matplotlib
     #   pyogrio
     #   pytest
@@ -94,14 +141,28 @@ pandas==3.0.6
     #   tessera-apps (pyproject.toml)
     #   geopandas
     #   xarray
+parso==0.8.7
+    # via jedi
 pathspec==1.1.1
     # via mypy
 pcodec==1.0.4
     # via numcodecs
+pexpect==4.9.0
+    # via ipython
 pillow==12.3.0
     # via matplotlib
+platformdirs==4.13.0
+    # via jupyter-core
 pluggy==1.6.0
     # via pytest
+prompt-toolkit==3.0.53
+    # via ipython
+psutil==7.2.2
+    # via ipython
+ptyprocess==0.7.0
+    # via pexpect
+pure-eval==0.2.4
+    # via stack-data
 pyarrow==26.0.0
     # via tessera-apps (pyproject.toml)
 pydantic==2.14.1
@@ -112,6 +173,8 @@ pydantic-core==2.50.1
     # via pydantic
 pygments==2.21.0
     # via
+    #   ipython
+    #   ipython-pygments-lexers
     #   pytest
     #   rich
 pyogrio==0.13.0
@@ -131,20 +194,33 @@ pytest==9.1.1
     # via tessera-apps (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via
+    #   jupyter-client
     #   matplotlib
     #   pandas
 pyyaml==6.0.3
     # via donfig
+pyzmq==27.2.0
+    # via
+    #   ipykernel
+    #   jupyter-client
 rasterio==1.5.2
     # via
     #   tessera-apps (pyproject.toml)
     #   rio-cogeo
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
 rich==15.0.0
     # via
     #   tessera-apps (pyproject.toml)
     #   typer
 rio-cogeo==7.0.4
     # via tessera-apps (pyproject.toml)
+rpds-py==2026.9.1
+    # via
+    #   jsonschema
+    #   referencing
 ruff==0.17.0
     # via tessera-apps (pyproject.toml)
 scikit-learn==1.9.1
@@ -161,20 +237,39 @@ shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
+stack-data==0.6.3
+    # via ipython
 threadpoolctl==3.7.0
     # via scikit-learn
+tornado==6.5.10
+    # via
+    #   ipykernel
+    #   jupyter-client
+traitlets==5.16.1
+    # via
+    #   ipykernel
+    #   ipython
+    #   jupyter-client
+    #   jupyter-core
+    #   matplotlib-inline
+    #   nbclient
+    #   nbformat
 typer==0.27.3
     # via tessera-apps (pyproject.toml)
 typing-extensions==4.16.0
     # via
+    #   jupyter-client
     #   mypy
     #   numcodecs
     #   pydantic
     #   pydantic-core
+    #   referencing
     #   typing-inspection
     #   zarr
 typing-inspection==0.4.4
     # via pydantic
+wcwidth==0.9.2
+    # via prompt-toolkit
 xarray==2026.9.0
     # via tessera-apps (pyproject.toml)
 zarr==3.4.1

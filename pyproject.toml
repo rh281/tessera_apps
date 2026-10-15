@@ -48,6 +48,10 @@ dev = [
     "ruff>=0.15",
     "mypy>=1.13",
     "rio-cogeo>=5.4",
+    # Execute the example notebooks (notebooks/*.ipynb) with their outputs saved.
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+    "ipykernel>=6.29",
 ]
 
 [project.scripts]

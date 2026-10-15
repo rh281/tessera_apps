@@ -11,3 +11,4 @@ build/
 .ipynb_checkpoints/
 out/
 .DS_Store
+notebooks/out/

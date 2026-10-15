@@ -167,7 +167,7 @@ Each module had a builder agent, a correctness reviewer, a test-strength reviewe
 
 ### Surprises
 
-- **Stable pixels are less similar than the brief suggests.** On the Caldor fixture, unburned pixels compared 2020 against 2022 have a median cosine of 0.895, not about 0.96. 0.96 is their 90th percentile. This supports survey S11: a fixed 0.9 recovery threshold would mark about half of stable land as "not recovered". Checkpoint 3 should normalise recovery against unburned pixels in the same radar regime.
+- **Stable pixels on the 64 x 64 fixture (corrected at checkpoint 3).** On the half-burned fixture window, unburned pixels compared 2020 against 2022 have a median cosine of 0.895. That is a property of a window that sits on the burn edge, not of stable land: across the whole Caldor AOI, land the wildfire app leaves unburned has a median of 0.96, with 83.5% above 0.9 (checkpoint 3). The survey S11 calibration is kept anyway, because it costs nothing and protects places where stable land drifts more.
 - **The mosaic needs GDAL's exact transformer.** GDAL's default 0.125-pixel approximate transformer put 2.2% of the 11N pixels at Caldor on a neighbouring source pixel. The exact transformer costs about twice as long when the larger zone is the one being reprojected.
 - **Hansen and NIFC disagree in shape.** Hansen 2021 loss covers 13.2% of the Caldor AOI, against 25.3% for the closed Hansen outline, because the scar is patchy inside. This matters for the IoU < 0.6 stop rule at checkpoint 3: a pixel mask scored against a filled perimeter has an IoU ceiling well below 1 (survey S10).
 
@@ -182,3 +182,121 @@ Each module had a builder agent, a correctness reviewer, a test-strength reviewe
 
 - The four applications, the CLI commands and the notebooks: checkpoints 3 to 6.
 - Live verification of the NIFC, EFFIS, GMW and USFS loaders.
+
+## Checkpoint 3: the wildfire app (2026-10-15)
+
+### Built
+
+- **Shared app framework, `apps/_common.py`.** Deforest, wetland and restore will reuse it.
+  - `load_aoi` takes a file in any CRS or a demo name.
+  - `prepare_run` plans the AOI, checks every year the app will read against `years_complete` and loads the validation reference, all before any chunk read. It also decides whether to skip: a rerun is skipped only when the arguments digest matches, and the digest includes the resolved store snapshot.
+  - `finish_run` writes the report last, with provenance, the bytes read and stage timings.
+  - `mosaic_and_clean` cleans masks on the mosaic of all zones, so a scar crossing a zone edge is judged whole.
+- **`apps/wildfire.py`**, the brief's section 4.1 as corrected by the survey:
+  - Pixels whose radar regime differs between the two years are excluded (B5).
+  - The threshold is Otsu, accepted only when the distance histogram also has a real valley. Otherwise it falls back to the 99th percentile of a stable pre-fire pair of years (N12).
+  - `fire_year` defaults to `year_b - 1` (N11).
+  - Recovery is calibrated against land shown to be unchanged, instead of a fixed 0.9 similarity (S11). That land has a distance at most half the threshold and lies 2 or more pixels from any burn.
+  - Validation reports recall inside the reference, the share of the burned mask outside it, and the caveats (S10).
+- **CLI:** `tessera-apps wildfire --aoi PATH|demo --year-a --year-b [--validate] [--reference] ...`. Exit code 2 means a usage or precondition error, raised before any read. Exit code 3 means `--strict-validate` failed.
+- **Outputs:**
+  - `wildfire_<a>_<b>.tif`: bands for distance, burned, and the recovery index for each year.
+  - Two PCA false colour COGs, sharing one basis.
+  - A summary table with one row per recovery year.
+  - A six-panel preview, the report, and the validation JSON.
+- **Notebook:** `notebooks/01_wildfire.ipynb`, executed with outputs. It is 1.5 MB.
+- **Tests:** 629 offline tests (up from 507), plus a network smoke test on a 290 ha live window.
+
+### Numbers: the Caldor demo, run from the CLI
+
+The command:
+
+```
+tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --reference hansen2021_outline.geojson
+```
+
+It ran against snapshot `B6AFRJGX5XQC0A716PA0`, from this container outside us-west-2, with no AWS credentials.
+
+| | |
+|---|---|
+| AOI | 279,849 ha in 10N and 11N |
+| Threshold | 0.244 by Otsu. eta 0.838, valley ratio 0.66 against a 0.9 limit, so no fallback was needed |
+| Burned | 51,443 ha, 18.4% of classified pixels. 5.49M pixels before cleaning, 5.14M after |
+| Radar regime mismatch, and radar-free share of the scar | 0% and 0% |
+| Bytes read | 23.03 GB of chunk payload (estimate 35.7 GB, an upper bound). Years 2019, 2020, 2022, 2023, 2024 and 2025 |
+| Wall time | 460 s, of which 307 s streaming |
+| Peak memory | 5.27 GB (the app's own estimate was 4.76 GB) |
+| Rerun with the same arguments | skipped in 3 s |
+| Determinism | two independent runs gave byte-identical outputs |
+| COGs | all three pass `rio cogeo validate` |
+
+Recovery of burned pixels against land that did not burn. The unburned reference median is about 0.96 every year, with its 10th percentile between 0.895 and 0.922:
+
+| Year | Median similarity, burned | Recovered fraction | Median recovery index R | Brief's share above 0.9 |
+|---|---|---|---|---|
+| 2022 | 0.567 | 0.00% | 0.000 | 0.00% |
+| 2023 | 0.598 | 0.03% | 0.079 | 0.06% |
+| 2024 | 0.617 | 0.16% | 0.127 | 0.53% |
+| 2025 | 0.599 | 0.74% | 0.091 | 0.59% |
+
+Four years after the fire, the burned pixels have recovered about a tenth of the way back to unburned land in embedding space, and almost none is inside normal year-to-year variation. That fits a high-severity conifer burn, where shrubs return long before forest does.
+
+### Validation and the brief's IoU 0.6 stop rule
+
+NIFC cannot be reached from the build environment, so the burned mask was scored against the Hansen 2021 loss outline bundled with the caldor demo. That is a filled outline of stand-replacing forest loss, not a fire perimeter.
+
+| | |
+|---|---|
+| IoU | **0.645** (10N 0.643, 11N 0.740) |
+| Precision | 0.933 |
+| Recall | 0.677 |
+| F1 | 0.784 |
+| Burned pixels outside the reference | 6.7% |
+
+Nothing was tuned: the threshold is Otsu's, the parameters are the defaults, and the reference was fixed before the run.
+
+The score is limited by recall. The diagnosis:
+
+- **The misses.** 43% of the 2.29M missed outline pixels did not change, so they are unburned islands. 57% changed, but less than the threshold, which fits low to moderate severity burn.
+- **Hansen's own pixels.** The app finds 94.8% of Hansen's own 2021 loss pixels, and Hansen loss covers only 51% of the filled outline.
+- **The false positives.** 51% are Hansen 2022 loss: delayed mortality or salvage logging inside the 2020 to 2022 window.
+- **Moving the threshold does not help.** The distance band from 0.12 to 0.24 holds more pixels outside the outline than missed pixels inside it.
+
+**Against NIFC, the IoU will very likely be below 0.6.** The app finds 51,443 burned ha and the official Caldor perimeter is 89,775 ha. If that perimeter lies inside the AOI, IoU is at most 51,443 / 89,775 = 0.57, whatever the overlap. This is the brief's stop-and-report case. A pixel mask of lasting spectral change cannot match a filled perimeter that includes unburned islands and light burn. That is a limit of the reference, not a threshold to tune. Two ways forward, which are a decision for you:
+
+1. Validate against a severity product instead of a perimeter. MTBS dNBR classes moderate and high are the natural choice for the US, and need mtbs.gov access.
+2. Keep NIFC, report recall inside the perimeter as the primary score, and keep IoU as a secondary score with this caveat.
+
+To score against NIFC where services3.arcgis.com is reachable:
+
+```
+tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --fire-name Caldor
+```
+
+### How it was checked
+
+One agent built the app and the framework. Three reviewers looked at the method, the framework and CLI, and test strength, and a skeptic verified each finding. Reviewers confirmed 29 findings, none were refuted, and all were fixed, with 59 mutants used to prove the new tests. A final agent ran the demo live, built and executed the notebook, and reran every check.
+
+Notable fixes:
+
+- **The recovery reference was contaminated.** It held burned land just under the threshold, which inflated recovery.
+- **The bimodality check read the density at Otsu's threshold, not at the valley floor.**
+- **A demo name lost to a directory with the same name.**
+- **Shapefile edits did not change the digest.** Editing a shapefile's `.prj` or `.dbf` left the AOI digest unchanged.
+- **A malformed `--reference` crashed late.** It was only parsed after the whole stream was read.
+- **An unwritable `--out` failed late**, after every read.
+- **A failed reference fetch forced a full re-stream on every rerun.** The validation is now redone from the outputs on disk.
+
+### Surprises
+
+- **Otsu's separability flag passes almost anything.** A single normal distribution scores eta 0.64, so the brief's "Otsu on the distance histogram" needs a valley test before a fallback can ever fire.
+- **The AOI-wide stable similarity is about 0.96, not 0.895.** The checkpoint 2 figure came from the half-burned fixture window, and the report above is corrected. The brief's 0.9 metric stays near zero at Caldor because burned pixels sit near 0.6, not because stable land is below 0.9.
+- **Memory is the scaling limit.** Caldor (28M pixels, 2 zones) peaks at 5.3 GB. A 10,000 km2 AOI would need about 19 GB with today's per-zone arrays. The app warns before any chunk read when its estimate exceeds available memory. Lifting the limit needs windowed COG writes in `export.write_geotiff`.
+
+### Changes to the brief
+
+1. **Section 4.1, the stop rule.** Score burned masks against NIFC by recall inside the perimeter, or use a severity product as the reference. IoU against a filled perimeter is bounded well below 1 by construction.
+2. **Section 4.1, recovery.** Replace the fixed 0.9 with the calibrated recovered fraction and recovery index, and keep 0.9 as a secondary metric.
+3. **Section 6, the AOI size limit.** Set it by memory as well as km2, or require windowed output writes before allowing 10,000 km2.
+4. **Section 8, network access.** The NIFC IoU needs an environment that can reach services3.arcgis.com.
+
