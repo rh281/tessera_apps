@@ -1,0 +1,42 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Ten Thousand Islands and Everglades mangrove coast demo AOI",
+    "source": "Box over the Ten Thousand Islands, Florida (Collier County), the mangrove coast between Everglades City and the northern edge of Everglades National Park",
+    "year_a": 2018,
+    "year_b": 2024,
+    "role": "aoi"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.32,
+       25.75
+      ],
+      [
+       -81.32,
+       25.97
+      ],
+      [
+       -81.62,
+       25.97
+      ],
+      [
+       -81.62,
+       25.75
+      ],
+      [
+       -81.32,
+       25.75
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

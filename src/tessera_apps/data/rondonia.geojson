@@ -1,0 +1,42 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "name": "Rondonia deforestation front demo AOI",
+    "source": "20 km box centred on 8.67 S, 63.11 W, about 87 km east of Porto Velho, on the active deforestation front (docs/prebuild-survey.md S14: 22 percent Hansen loss 2020 to 2022 against 1.4 percent in a box on the city)",
+    "year_a": 2019,
+    "year_b": 2022,
+    "role": "aoi"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -63.01913,
+       -8.75983
+      ],
+      [
+       -63.01913,
+       -8.58017
+      ],
+      [
+       -63.20087,
+       -8.58017
+      ],
+      [
+       -63.20087,
+       -8.75983
+      ],
+      [
+       -63.01913,
+       -8.75983
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}
