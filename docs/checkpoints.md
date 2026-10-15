@@ -90,6 +90,95 @@ All of these are in `docs/prebuild-survey.md`, "Proposed edits to the brief". Th
 
 ### Not done at this checkpoint
 
-- **Checkpoint 2.** `metrics.py`, `export.py` and `validate.py` are not started.
-- **Network test tier.** No `pytest -m network` tests exist yet.
-- **CLI.** It is a placeholder.
+- **Checkpoint 2.** Done next, see below.
+- **CLI.** Only `tessera-apps info` exists.
+
+## Checkpoint 2: metrics, export, validation loaders (2026-10-15)
+
+### Built
+
+- **`metrics.py`** is pure numpy and scipy.
+  - **Cosine.** `cosine_similarity` computes on int8 directly: the per-pixel scales cancel, so the result is exact. Integer accumulation avoids overflow, and large blocks are processed in strips. On top of it sit `cosine_similarity_map`, `cosine_distance_map` and `cosine_to_vector`.
+  - **Means and trajectories.** `mean_embedding` dequantizes and pools across blocks. `trajectory` gives per-pixel similarity to a reference year.
+  - **Radar regime.** `same_radar_regime` is the survey B5 guard.
+  - **Thresholds and masks.** `otsu_threshold` reports separability and bimodality, for the survey N12 fallback. `clean_mask` applies a 3 x 3 opening and a minimum area. `component_sizes` gives patch sizes, and `area_to_pixels` converts hectares to pixels.
+  - **False colour.** `fit_pca` and `pca_rgb` give deterministic PCA colours. The basis can be reused across years, so before and after colours are comparable.
+- **`export.py`.**
+  - **Rasters.** `write_geotiff` writes a COG through GDAL's COG driver, atomically, and handles NaN and bool nodata. `mosaic_zones` merges per-zone results into one raster: each ground pixel comes from its nominal zone, using GDAL's exact transformer and a seam pass so no holes are left along 120 W.
+  - **Tables, JSON and previews.** `write_table` writes parquet and csv, and `write_json` is numpy-safe. `write_preview_png` uses a matplotlib Figure, never pyplot.
+  - **Provenance and reruns.** `provenance_record` puts the snapshot id under data provenance and `checkpoint_id` under model provenance (survey S4). It records library versions and the AOI sha256, and drops anything that looks like a credential. `output_paths`, `outputs_current` and `begin_run` make reruns idempotent: outputs are skipped only when `report.json` records the same arguments digest (survey S19).
+- **`validate.py`.**
+  - **Scoring.** `binary_scores` and `merge_scores` return null, never NaN, on an empty denominator. There are also `confusion_matrix`, `per_class_f1` and `write_validation_json`.
+  - **Reference rasters on the AOI grid.** `reference_from_geometries`, `reference_from_file` (the `--reference` option, any CRS) and `reference_from_raster` (windowed, exact transformer).
+  - **Loaders.**
+    - NIFC (`nifc_perimeters`), from ArcGIS REST, with runtime field discovery and paging.
+    - EFFIS (`effis_burnt_areas`), WFS 2.0 with an axis-order guard.
+    - Hansen GFC v1.13 (`hansen_loss`, `hansen_forest`, `hansen_valid`, `hansen_layer`). Loss is counted over the year window (a, b], following survey S13.
+    - Global Mangrove Watch v3 and v4.1.12 (`gmw_extent`, `gmw_coverage`). Versions are never mixed, and years v3 does not cover raise an error.
+    - Natural Earth coastline (`natural_earth_coastline`).
+    - USFS FACTS reforestation polygons (`usfs_reforestation`), as a source of restore demo sites.
+  - **Caching and errors.** Downloads are cached atomically under `~/.cache/tessera_apps/reference/`. Every remote read has timeouts. An unreachable host raises `ReferenceUnavailableError`, which names the host and says how to supply the data by hand.
+- **`demo.py`** loads the bundled demo AOIs: `caldor`, `rondonia` (new, survey S14) and `everglades` (new).
+- **Tests and dependencies.**
+  - 507 offline tests run in about 60 s, plus 7 network tests (`pytest -m network`).
+  - The `[validate]` extra is now empty: validate.py needs only the standard library and GDAL, so `requests` and `owslib` were dropped from the lock.
+  - `pyogrio` is declared directly, because validate.py imports it.
+
+### Numbers
+
+`scripts/checkpoint2_loaders.py` calls every loader on its demo AOI. The zone plans come from the live store, snapshot `B6AFRJGX5XQC0A716PA0`.
+
+| Demo AOI | Loader | Result |
+|---|---|---|
+| Caldor (10N + 11N, 279,849 ha) | `reference_from_geometries`, Hansen 2021 loss outline | raster on 2 zones, 25.3% of AOI pixels, 0.6 s |
+| Caldor | `hansen_loss(2020, 2021)` | raster on 2 zones, 13.2% of AOI pixels, 33 s |
+| Caldor | `nifc_perimeters(year=2021, name="CALDOR")` | **unavailable here**: services3.arcgis.com is blocked (403) |
+| Europe probe | `effis_burnt_areas` | **unavailable here**: maps.effis.emergency.copernicus.eu is blocked |
+| Rondonia (20S, 39,717 ha) | `hansen_loss(2019, 2022)` | 22.14% of AOI pixels (survey: 22.1%) |
+| Rondonia | `hansen_forest(2019)` (tree cover >= 30%) | 61.12% (survey: about 61%) |
+| Rondonia | `hansen_valid` | 100% land |
+| Everglades (17N, 73,237 ha) | `gmw_extent(2018, version="v3")` | **unavailable here**: zenodo.org is blocked |
+| Everglades | `natural_earth_coastline` | 4 lines, 105.4 km, median segment 0.91 km |
+| King Fire area probe | `usfs_reforestation(2019 to 2020)` | **unavailable here**: apps.fs.usda.gov is blocked |
+
+So the checkpoint target, "each validator loader returns a raster for its demo AOI", is met live for Hansen and the geometry and file paths, and the Natural Earth loader returns lines for the Everglades. It is **not** met live for NIFC, EFFIS, GMW or USFS: those four are tested only offline, against responses built from each service's documented format, and stay unverified until the hosts are allowed.
+
+On the real 64 x 64 Caldor fixture, the integration test runs the whole chain: read, cosine distance 2020 to 2022, Otsu, clean mask, mosaic, COG, then score against the Hansen outline. Otsu put the threshold at 0.2526, with eta 0.76, so the distances are bimodal. The burned fraction was 0.531. Against the Hansen 2021 outline, precision was 0.875, recall 0.842 and IoU 0.751. That is one 0.4 km window, a preview of checkpoint 3, not its result.
+
+COGs from `write_geotiff` pass `rio cogeo validate`: float32 with NaN nodata, a bool mask as uint8 with nodata 255, and a mosaic across 10N and 11N.
+
+### How it was checked
+
+Each module had a builder agent, a correctness reviewer, a test-strength reviewer, a skeptic on every finding, and then a fix pass by the builder. An integration agent then checked the three modules together.
+
+- **Mutation testing at build time.** Builders killed 37 of 37 mutants (metrics), 47 of 47 (export) and 45 of 46 (validate).
+- **Confirmed findings.** Reviewers confirmed 36 and refuted 4. All were fixed except one, which belongs to the apps (see below).
+- **Notable bugs fixed:**
+  - Holes along the zone seam when a mosaic is assembled from blocks.
+  - `outputs_current` accepting a validation.json from a run with different arguments.
+  - EFFIS GML crashing on an empty page, and EFFIS paging silently stopping at a server-side cap.
+  - GMW v4.1.12 picking files from the wrong year.
+  - South-up rasters crashing the reference reader.
+  - No GDAL HTTP timeouts.
+  - Cached GMW files still needing Zenodo to load.
+  - Otsu peak memory at about 6 times the input.
+  - Explicit masks replacing the AOI mask instead of being ANDed with it.
+- **Change outside the three modules.** I gave `cache.py` a single `cache_dir()`, read when called, so chunk caches and reference downloads always share one root. An empty `TESSERA_APPS_CACHE` had made the two diverge.
+
+### Surprises
+
+- **Stable pixels are less similar than the brief suggests.** On the Caldor fixture, unburned pixels compared 2020 against 2022 have a median cosine of 0.895, not about 0.96. 0.96 is their 90th percentile. This supports survey S11: a fixed 0.9 recovery threshold would mark about half of stable land as "not recovered". Checkpoint 3 should normalise recovery against unburned pixels in the same radar regime.
+- **The mosaic needs GDAL's exact transformer.** GDAL's default 0.125-pixel approximate transformer put 2.2% of the 11N pixels at Caldor on a neighbouring source pixel. The exact transformer costs about twice as long when the larger zone is the one being reprojected.
+- **Hansen and NIFC disagree in shape.** Hansen 2021 loss covers 13.2% of the Caldor AOI, against 25.3% for the closed Hansen outline, because the scar is patchy inside. This matters for the IoU < 0.6 stop rule at checkpoint 3: a pixel mask scored against a filled perimeter has an IoU ceiling well below 1 (survey S10).
+
+### Changes to the brief and to the apps
+
+1. **Section 5 and 8, network access.** Validation of wildfire (NIFC, EFFIS), wetland (GMW on Zenodo) and the restore demo site (USFS) needs those hosts. Run the network tier where they are reachable, or supply files with `--reference` or `source=`.
+2. **Section 3, the `[validate]` extra.** It needs no packages. Keep it empty, or drop it.
+3. **Checkpoint 3 design.** On a multi-zone AOI, run `clean_mask` and the minimum-area filter on the mosaic, not per zone, or a scar crossing 120 W is split and its parts dropped (metrics M5).
+4. **Checkpoint 3 design.** AND `same_radar_regime` into every compared pair of years (survey B5). Stream means and PCA as per-block sums or samples rather than holding every block in memory.
+
+### Not done at this checkpoint
+
+- The four applications, the CLI commands and the notebooks: checkpoints 3 to 6.
+- Live verification of the NIFC, EFFIS, GMW and USFS loaders.

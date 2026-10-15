@@ -15,7 +15,14 @@ from pathlib import Path
 
 import numpy as np
 
-DEFAULT_CACHE_DIR = Path(os.environ.get("TESSERA_APPS_CACHE", Path.home() / ".cache" / "tessera_apps")) / "chunks"
+
+def cache_dir() -> Path:
+    """Root of every on-disk cache: ``$TESSERA_APPS_CACHE`` if set and not empty, else ``~/.cache/tessera_apps``.
+
+    Read when called, so chunk caches and reference downloads always agree on the root.
+    """
+    root = os.environ.get("TESSERA_APPS_CACHE")
+    return Path(root) if root else Path.home() / ".cache" / "tessera_apps"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -49,7 +56,7 @@ class ChunkCache:
     def __init__(
         self, root: Path | str | None = None, namespace: str = UNPINNED, *, stats: CacheStats | None = None
     ) -> None:
-        self.root = Path(root) if root is not None else DEFAULT_CACHE_DIR
+        self.root = Path(root) if root is not None else cache_dir() / "chunks"
         self.namespace = namespace
         self.stats = stats if stats is not None else CacheStats()
 

@@ -16,9 +16,6 @@ certifi==2026.7.22
     #   pyogrio
     #   pyproj
     #   rasterio
-    #   requests
-charset-normalizer==3.5.2
-    # via requests
 click==8.5.0
     # via
     #   morecantile
@@ -40,8 +37,6 @@ google-crc32c==1.9.0
     # via zarr
 icechunk==2.3.0
     # via tessera-apps (pyproject.toml)
-idna==3.20
-    # via requests
 iniconfig==2.3.1
     # via pytest
 joblib==1.6.0
@@ -50,8 +45,6 @@ kiwisolver==1.5.1
     # via matplotlib
 librt==0.16.0
     # via mypy
-lxml==6.1.3
-    # via owslib
 markdown-it-py==4.2.0
     # via rich
 matplotlib==3.11.2
@@ -88,8 +81,6 @@ numpy==2.5.4
     #   shapely
     #   xarray
     #   zarr
-owslib==0.36.0
-    # via tessera-apps (pyproject.toml)
 packaging==26.3
     # via
     #   geopandas
@@ -124,7 +115,9 @@ pygments==2.21.0
     #   pytest
     #   rich
 pyogrio==0.13.0
-    # via geopandas
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geopandas
 pyparsing==3.3.3
     # via
     #   matplotlib
@@ -139,20 +132,13 @@ pytest==9.1.1
 python-dateutil==2.9.0.post0
     # via
     #   matplotlib
-    #   owslib
     #   pandas
 pyyaml==6.0.3
-    # via
-    #   donfig
-    #   owslib
+    # via donfig
 rasterio==1.5.2
     # via
     #   tessera-apps (pyproject.toml)
     #   rio-cogeo
-requests==2.34.2
-    # via
-    #   tessera-apps (pyproject.toml)
-    #   owslib
 rich==15.0.0
     # via
     #   tessera-apps (pyproject.toml)
@@ -189,8 +175,6 @@ typing-extensions==4.16.0
     #   zarr
 typing-inspection==0.4.4
     # via pydantic
-urllib3==2.8.0
-    # via requests
 xarray==2026.9.0
     # via tessera-apps (pyproject.toml)
 zarr==3.4.1

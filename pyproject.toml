@@ -28,6 +28,8 @@ dependencies = [
     "shapely>=2.0",
     "xarray>=2025.1",
     "geopandas>=1.0",
+    # Imported directly by validate.py to read vector references (geopandas already requires it).
+    "pyogrio>=0.7",
     "pandas>=2.2",
     "pyarrow>=17",
     "scipy>=1.13",
@@ -38,8 +40,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Loaders for the reference datasets in validate.py. None of them is a STAC source (survey S8).
-validate = ["requests>=2.32", "owslib>=0.31"]
+# validate.py reaches every reference source with the standard library (urllib) and GDAL, so the
+# base install can validate; the extra is kept so `pip install tessera_apps[validate]` still works.
+validate = []
 dev = [
     "pytest>=8",
     "ruff>=0.15",

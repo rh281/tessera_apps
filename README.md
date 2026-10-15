@@ -2,7 +2,7 @@
 
 Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global embeddings published by dClimate: 128-dimension, 10 m, annual (2017 to 2025) embeddings in an anonymous Icechunk store at `s3://tessera-embeddings/v1.1/dclimate.icechunk` (AWS `us-west-2`). No GPU, no model training beyond scikit-learn linear models.
 
-**Status: checkpoint 1 of the build brief (scaffold and `io.py`).** The four applications below are planned and not built yet. See `docs/checkpoints.md` for the checkpoint report and numbers.
+**Status: checkpoint 2 of the build brief (`io.py`, `metrics.py`, `export.py`, `validate.py`).** The four applications below are planned and not built yet. See `docs/checkpoints.md` for the checkpoint report and numbers.
 
 | App | Question | Status |
 |---|---|---|
@@ -47,11 +47,18 @@ What `io.py` takes care of:
 - **Radar.** `Window.radar_free` marks pixels embedded without Sentinel-1. Comparing a radar year with a radar-free year biases cosine distance (see the survey, B5).
 - **Cache.** `ChunkCache` is an optional on-disk chunk cache, namespaced by Icechunk snapshot.
 
+## Other modules
+
+- `metrics.py`: cosine similarity and distance maps (exact on int8), mean embeddings and per-pixel trajectories, the radar-regime match, Otsu with a bimodality check, mask cleaning, and PCA false colour with a basis shared across years.
+- `export.py`: Cloud Optimized GeoTIFFs, a mosaic of per-zone results that takes each ground pixel from its nominal zone, parquet and csv tables, JSON, preview PNGs, provenance records, and idempotent output checks.
+- `validate.py`: binary and multi-class scores, reference rasters on the AOI grid from geometries, files or rasters, and loaders for NIFC, EFFIS, Hansen GFC, Global Mangrove Watch, the Natural Earth coastline and USFS FACTS. Downloads are cached under `~/.cache/tessera_apps/reference/`.
+- `demo.py`: the bundled demo AOIs (`caldor`, `rondonia`, `everglades`).
+
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 164 offline tests, in-memory stores and a real 64 x 64 fixture
-.venv/bin/python -m pytest -m network  # live store (none yet)
+.venv/bin/python -m pytest -q          # 507 offline tests, in-memory stores and a real 64 x 64 fixture
+.venv/bin/python -m pytest -m network  # live store and reference datasets (NIFC, EFFIS, Zenodo, USFS must be reachable)
 .venv/bin/ruff check src tests scripts && .venv/bin/mypy src tests scripts
 ```
 
