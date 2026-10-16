@@ -1,6 +1,6 @@
 """The four climate applications and the plumbing they share.
 
-Each app is a function (``run_wildfire`` and, from later checkpoints, ``run_deforest``,
+Each app is a function (``run_wildfire``, ``run_deforest`` and, from later checkpoints,
 ``run_wetland`` and ``run_restore``) with a matching ``tessera-apps`` command. They share
 :mod:`tessera_apps.apps._common`: AOI loading, the run preparation that checks every year and
 skips a run whose outputs are current, the zone mosaic that cleans masks across UTM seams, and the
@@ -19,10 +19,12 @@ from tessera_apps.apps._common import (
     mosaic_and_clean,
     prepare_run,
 )
+from tessera_apps.apps.deforest import DeforestResult, run_deforest
 from tessera_apps.apps.wildfire import WildfireResult, run_wildfire
 
 __all__ = [
     "AppInputError",
+    "DeforestResult",
     "LoadedAOI",
     "RunContext",
     "StrictValidationError",
@@ -31,5 +33,6 @@ __all__ = [
     "load_aoi",
     "mosaic_and_clean",
     "prepare_run",
+    "run_deforest",
     "run_wildfire",
 ]

@@ -300,3 +300,101 @@ Notable fixes:
 3. **Section 6, the AOI size limit.** Set it by memory as well as km2, or require windowed output writes before allowing 10,000 km2.
 4. **Section 8, network access.** The NIFC IoU needs an environment that can reach services3.arcgis.com.
 
+## Checkpoint 4: the deforest app (2026-10-16)
+
+### Built
+
+- **`apps/deforest.py`**, the brief's section 4.2 as corrected by the survey:
+  - **Labels** come from Hansen, sampled only in a 5 km ring outside the AOI, so the validation inside the AOI is spatially held out (S12). Forest is tree cover >= 50% with no loss up to year_a. Non-forest is tree cover < 10%, or loss at least two years before year_a (S13).
+  - **Cluster sampling** caps the cost at 24 store chunks and 500 labels per class.
+  - **`--labels CSV`** replaces the Hansen labels, and is validated before any read.
+  - **Radar regime.** A probe picks the training regime (B5).
+  - **Classifier.** A standardized logistic regression, scored on held-out chunks with GroupKFold, plus a check that it transfers to year_b on Hansen-stable labels.
+  - **Conversion** = forest in year_a, non-forest in year_b, and a cosine distance above the 95th percentile of stable forest (N13). It is cleaned on the mosaic of all zones.
+  - **Validation** is against Hansen loss in (year_a, year_b]. The report adds the brief's year_b-only comparison, a lag-aligned window, a breakdown by loss year, and the agreement of the forest maps with Hansen.
+- **CLI:** `tessera-apps deforest --aoi PATH|demo --year-a --year-b [--validate] [--labels CSV] ...`.
+- **Framework:** `_common.BandMosaic` and `spread_indices` were added. Wildfire is untouched.
+- **Notebook:** `notebooks/02_deforest.ipynb`, executed. It includes the section the brief asks for on running where no forest layer exists: a `--labels` run, a curve of scores against the number of labels, and a CSV of candidate points to label.
+- **Tests:** 750 offline (up from 629). The new smoke fixture is 6.6 KB of real Hansen tile pieces under the Caldor test window.
+
+### Numbers: the Rondonia demo, run from the CLI
+
+The command:
+
+```
+tessera-apps deforest --aoi rondonia --year-a 2019 --year-b 2022 --validate
+```
+
+It ran against snapshot `B6AFRJGX5XQC0A716PA0`. A rerun gave identical numbers after the caveat fix.
+
+| | |
+|---|---|
+| AOI | 39,717 ha (20S) |
+| Labels | 500 forest and 500 non-forest, from 24 of 112 ring chunks, none inside the AOI, all in the radar regime |
+| Classifier | training accuracy 0.974. Held out by chunk: balanced accuracy 0.956 (forest recall 0.964, non-forest 0.948). Transfer to 2022: 0.946 |
+| Forest | 24,069 ha (60.6%) in 2019, 17,497 ha (44.1%) in 2022. Agreement with Hansen's forest proxy: 0.950 in 2019, 0.930 in 2022 |
+| Converted | 6,018 ha, 25.0% of 2019 forest, in 248 patches (median 2.4 ha, largest 543 ha; patches over 100 ha hold 61% of the area) |
+| Cross-check cut | 0.244 (the 95th percentile of 1.64M stable-forest pixels). It removed 94,974 flips |
+| Radar | mismatch 0%, all pixels radar |
+| Cost | 1.55 GB read, 80 s wall (about 40 s of it the Hansen reads), 1.86 GB peak memory |
+| Rerun with the same arguments | skipped in 2.5 s |
+
+### Validation: the checkpoint answer
+
+| Reference | IoU | Precision | Recall | F1 |
+|---|---|---|---|---|
+| Hansen loss 2020 to 2022, the window from survey S13 (headline) | 0.657 | **0.976** | **0.668** | 0.793 |
+| Hansen loss in 2022 only, the brief's checkpoint | | **0.351** | **0.731** | |
+| Hansen loss 2019 to 2021, lag-aligned | 0.384 | 0.629 | 0.496 | 0.555 |
+
+**Against "Hansen loss for Rondonia 2022" precision is 0.351 and recall 0.731.** The low precision is by construction: 62% of the conversions are Hansen 2020 and 2021 loss, which a 2022-only reference counts as false. Over the full window, precision is 0.976 and recall 0.668. Nothing was tuned.
+
+Where the scores disagree:
+
+- **Edges dominate.** 53% of the misses and 92% of the extra pixels lie within one Hansen pixel (30 m) of a loss boundary. Away from that band, recall is 0.794 and precision 0.998.
+- **Misses by method step:**
+  - 17%: already non-forest in 2019.
+  - 32%: still forest in 2022 although the embedding changed. These are likely fresh clearings with slash or burning. Hansen-derived non-forest labels contain no fresh clearing, so the classifier never saw one.
+  - 22%: flipped to non-forest, but below the cross-check cut.
+  - 18%: removed by the opening or the 0.5 ha minimum area.
+- **Timing.** The app converted only 1.4% of Hansen 2019 loss pixels: the 2019 embedding already reads that year's dry-season clearing as cleared. So on this front the (2019, 2022] window is the aligned one, and the lag-aligned window scores worse. The validation caveat now reports this per run from the measured loss-year breakdown, instead of assuming a lag.
+- **The cross-check cut costs recall.** On this front it buys 1.8 points of precision for 10 points of recall: with no cut, precision is 0.958, recall 0.769 and IoU 0.744. That is reported as a diagnosis; the parameters stay as specified. The app warns when the AOI cut is far above the same percentile on Hansen-stable ring labels: here 0.244 against 0.153.
+
+### Running without a forest layer
+
+The notebook uses Hansen ring pixels as stand-ins for hand labels, and says so. Over 5 draws per count, applied to half the AOI:
+
+| Labels per class | Mean recall | Recall range |
+|---|---|---|
+| 25 | 0.56 | 0.42 to 0.70 |
+| 50 | 0.34 | 0.10 to 0.76 |
+| 100 | 0.55 | 0.46 to 0.72 |
+| 250 | 0.57 | 0.36 to 0.69 |
+| 500 | 0.66 | |
+
+Precision stays between 0.95 and 0.98 throughout. Recall varies with the cross-check cut, which comes from the stable forest a given label set produces (correlation -0.99 between the two). So with few labels, recall depends on that cut more than on how good the classifier is. An end-to-end `--labels` run with 50 labels per class gave precision 0.977 and recall 0.334.
+
+### How it was checked
+
+The review pattern was the same as at checkpoint 3. Reviewers confirmed 21 findings, none were refuted, and all were fixed; 52 mutants were used to prove the new tests. One more fix came after the demo: the window caveat was rewritten to report measured shares, and the demo and notebook were re-run.
+
+Notable fixes:
+
+- **A missing Hansen version read as ocean.** A `--hansen-version` that is not on the bucket was read as ocean, not refused.
+- **Errors named the wrong zones.** The years check named the AOI zones even when the failing zone was one only the label ring touched.
+- **The memory estimate missed the label stage.**
+- **The CLI swallowed bracketed text.** Rich markup dropped bracketed words from file names.
+- **The year_b forest map had no check that the classifier transfers.**
+
+### Surprises
+
+- **Every non-forest label is old clearing.** Tree cover in 2000 was at least 90% on 99.96% of the ring, so the Hansen-derived non-forest class at this site is land cleared between 2001 and 2017. That is the likely root of the "still forest in 2022" misses on fresh clearings.
+- **Annual embeddings line up with Hansen's year here**, rather than lagging by a year as I expected.
+- **The cross-check cut is the most influential parameter**, and the brief fixes its rule. With hand labels it also makes recall unstable.
+
+### Changes to the brief
+
+1. **Section 4.2 validation.** Report the (year_a, year_b] window as the headline, and the year_b-only comparison as a secondary score with its by-construction caveat.
+2. **Section 4.2 cross-check.** Consider calibrating the cut on stable land outside the AOI (the ring), or dropping it. On this front it costs 10 recall points for 1.8 precision points. Worth testing on more AOIs before changing.
+3. **Section 4.2 labels.** Add a fresh-clearing class: loss in year_a - 1 or year_a labelled non-forest in year_b. That needs a design decision on what the classifier sees.
+

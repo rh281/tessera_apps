@@ -211,3 +211,67 @@ def boundary_store(_boundary_mem) -> tuple[MemoryStore, KeyLog]:
 def boundary_reader(boundary_store) -> TesseraReader:
     _, logged = boundary_store
     return TesseraReader.from_store(logged)
+
+
+# --------------------------------------------------------------------------------------------
+# Hansen tile pieces under the caldor fixture (deforest tests)
+# --------------------------------------------------------------------------------------------
+
+HANSEN_LAYER_NAMES = ("treecover2000", "lossyear", "datamask")
+
+
+@pytest.fixture(scope="session")
+def caldor_hansen() -> dict[str, Any]:
+    """The Hansen GFC tile pieces under the caldor fixture store (``scripts/make_hansen_fixture.py``).
+
+    ``treecover2000``, ``lossyear`` and ``datamask`` on Hansen's own 0.00025 degree grid, with the
+    piece's ``west``, ``north``, ``res``, ``tile`` and ``version``.
+    """
+    with np.load(FIXTURES / "caldor_64_hansen.npz") as d:
+        return {k: d[k] for k in d.files}
+
+
+def write_hansen_tiles(
+    directory: Path,
+    pieces: dict[str, Any],
+    *,
+    edit: Callable[[str, np.ndarray], np.ndarray] | None = None,
+) -> str:
+    """Write Hansen tile pieces as local tiles named like the real ones; returns the ``url_template``.
+
+    ``edit(layer, array)`` may change a layer's values before it is written (for example to put water
+    in the datamask).
+    """
+    import rasterio
+    from rasterio.transform import from_origin
+
+    directory.mkdir(parents=True, exist_ok=True)
+    version, tile = str(pieces["version"]), str(pieces["tile"])
+    transform = from_origin(float(pieces["west"]), float(pieces["north"]), float(pieces["res"]), float(pieces["res"]))
+    for layer in HANSEN_LAYER_NAMES:
+        data = np.array(pieces[layer], dtype=np.uint8)
+        if edit is not None:
+            data = np.asarray(edit(layer, data), dtype=np.uint8)
+        profile = {
+            "driver": "GTiff",
+            "width": data.shape[1],
+            "height": data.shape[0],
+            "count": 1,
+            "dtype": "uint8",
+            "crs": "EPSG:4326",
+            "transform": transform,
+        }
+        with rasterio.open(directory / f"Hansen_{version}_{layer}_{tile}.tif", "w", **profile) as ds:
+            ds.write(data, 1)
+    return str(directory / "Hansen_{version}_{layer}_{tile}.tif")
+
+
+def fixture_window_lonlat(fx: dict[str, np.ndarray], rows: tuple[int, int], cols: tuple[int, int]) -> Any:
+    """The lon/lat polygon of a window of the caldor fixture grid, ``rows`` and ``cols`` as (start, stop)."""
+    import shapely
+    from shapely.geometry import box
+
+    a, _, c, _, _, f = (float(v) for v in fx["transform"])
+    square = box(c + cols[0] * a, f - rows[1] * a, c + cols[1] * a, f - rows[0] * a)
+    to_ll = Transformer.from_crs(int(fx["epsg"]), 4326, always_xy=True)
+    return shapely.transform(shapely.segmentize(square, 10.0), to_ll.transform, interleaved=False)

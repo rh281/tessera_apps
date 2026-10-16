@@ -2,12 +2,12 @@
 
 Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global embeddings published by dClimate: 128-dimension, 10 m, annual (2017 to 2025) embeddings in an anonymous Icechunk store at `s3://tessera-embeddings/v1.1/dclimate.icechunk` (AWS `us-west-2`). No GPU, no model training beyond scikit-learn linear models.
 
-**Status: checkpoint 3 of the build brief.** `wildfire` is built; the other three applications are planned. See `docs/checkpoints.md` for the checkpoint report and numbers.
+**Status: checkpoint 4 of the build brief.** `wildfire` and `deforest` are built; `wetland` and `restore` are planned. See `docs/checkpoints.md` for the checkpoint report and numbers.
 
 | App | Question | Status |
 |---|---|---|
 | `wildfire` | Where did it burn, and how far has each burned pixel recovered? | built, [notebook 01](notebooks/01_wildfire.ipynb) |
-| `deforest` | Where did forest become something else between two years? | planned |
+| `deforest` | Where did forest become something else between two years? | built, [notebook 02](notebooks/02_deforest.ipynb) |
 | `wetland` | Given a few known wetland locations, where else is that wetland, and how has it moved? | planned |
 | `restore` | Is a restoration site diverging from a matched control the way a working project should? | planned |
 
@@ -30,6 +30,16 @@ tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --fire
 ```
 
 This writes `out/wildfire_2020_2022.tif` (distance, burned and per-year recovery bands), two PCA false colour COGs, `wildfire_summary.parquet` and `.csv` (one row per year), `wildfire_preview.png`, `wildfire_report.json` and `wildfire_validation.json`. The Caldor demo reads about 23 GB and takes about 8 minutes outside us-west-2. See [notebook 01](notebooks/01_wildfire.ipynb) and `docs/checkpoints.md` for the results.
+
+## Deforest
+
+Finds where forest became something else between two years, and the forest baseline in each. It trains a forest / non-forest logistic regression on labels sampled from Hansen in a ring outside the AOI (or on your own `--labels` CSV, for places with no forest layer), classifies both years, and calls conversion where forest in year A is non-forest in year B and the embedding really changed. With `--validate` it scores the conversion against Hansen loss over the same window.
+
+```bash
+tessera-apps deforest --aoi rondonia --year-a 2019 --year-b 2022 --validate
+```
+
+This writes `out/deforest_2019_2022.tif` (forest probability in both years, distance, converted), `deforest_summary.parquet` and `.csv`, `deforest_labels.parquet`, `deforest_preview.png`, `deforest_report.json` and `deforest_validation.json`. The Rondonia demo reads 1.6 GB in under 2 minutes. See [notebook 02](notebooks/02_deforest.ipynb), which also shows how to run with hand labels.
 
 ## Reading the store
 
@@ -67,7 +77,7 @@ What `io.py` takes care of:
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 629 offline tests, in-memory stores and a real 64 x 64 fixture
+.venv/bin/python -m pytest -q          # 750 offline tests, in-memory stores and a real 64 x 64 fixture
 .venv/bin/python -m pytest -m network  # live store and reference datasets (NIFC, EFFIS, Zenodo, USFS must be reachable)
 .venv/bin/ruff check src tests scripts && .venv/bin/mypy src tests scripts
 ```
