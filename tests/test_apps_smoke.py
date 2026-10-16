@@ -4,6 +4,11 @@ The wildfire app runs on ``tests/fixtures/caldor_64.npz``: a real 64 x 64 window
 about half burned, with all nine years 2017 to 2025, served by the in-memory store of
 ``tests/conftest.py``. The AOI is the window minus a two-pixel margin, and the validation reference
 is the caldor demo's Hansen 2021 loss outline clipped to it.
+
+The deforest app runs on the same store, with the Hansen GFC tile pieces under the fixture
+(``tests/fixtures/caldor_64_hansen.npz``) served as local tiles through the loaders' ``url_template``,
+so both its labels and its validation run offline. Its AOI is the central 40 x 40 pixels and its
+label ring the 10 pixels around them.
 """
 
 from __future__ import annotations
@@ -23,15 +28,17 @@ from shapely.geometry import box, mapping
 from typer.testing import CliRunner
 
 from tessera_apps import export, metrics, validate
-from tessera_apps.apps import StrictValidationError, WildfireResult
+from tessera_apps.apps import DeforestResult, StrictValidationError, WildfireResult
+from tessera_apps.apps import deforest as dfr
 from tessera_apps.apps import wildfire as wf
 from tessera_apps.apps._common import AppInputError
+from tessera_apps.apps.deforest import run_deforest
 from tessera_apps.apps.wildfire import memory_estimate, run_wildfire
 from tessera_apps.cli import EXIT_USAGE, EXIT_VALIDATION, app
 from tessera_apps.demo import demo_feature
 from tessera_apps.io import FIRST_YEAR, iter_plan_blocks, plan_aoi, read_plan
 
-from .conftest import BOUNDARY
+from .conftest import BOUNDARY, fixture_window_lonlat, write_hansen_tiles
 
 RECOVERY_FIELDS = (
     "median_sim_burned",
@@ -702,3 +709,459 @@ def test_wildfire_live_window(tmp_path, monkeypatch):
     assert ref["pre_fire_similarity"]["median"] > 0.95 and ref["pre_minus_post_median"] is not None
     assert s["validation"]["recovery_reference_inside_fraction"] < 0.15
     assert all(row["recovered_fraction"] < 0.01 for row in s["recovery"])
+
+
+# --------------------------------------------------------------------------------------------
+# Deforest: end to end on the caldor fixture, labels and validation from local Hansen tiles
+# --------------------------------------------------------------------------------------------
+
+DEFOREST_ROWS = DEFOREST_COLS = (12, 52)
+DEFOREST_KW = {"label_ring_km": 0.1, "labels_per_class": 100, "min_area_ha": 0.05, "block": (32, 32)}
+DEFOREST_BANDS = ("forest_prob_2019", "forest_prob_2022", "distance_2019_2022", "converted")
+DEFOREST_FILES = (
+    "deforest_2019_2022.tif",
+    "deforest_summary.parquet",
+    "deforest_summary.csv",
+    "deforest_labels.parquet",
+    "deforest_preview.png",
+    "deforest_validation.json",
+    "deforest_report.json",
+)
+LABEL_COLUMNS = [
+    "lon",
+    "lat",
+    "label",
+    "weight",
+    "source",
+    "source_chunk",
+    "zone",
+    "row",
+    "col",
+    "valid",
+    "regime",
+    "used",
+    "drop_reason",
+    "fold",
+    "heldout_prob",
+    "inside_aoi",
+]
+
+
+@pytest.fixture
+def deforest_hansen(caldor_hansen, tmp_path, monkeypatch) -> str:
+    """The Hansen tile pieces under the fixture as local tiles, with the reference cache under tmp_path."""
+    monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
+    return write_hansen_tiles(tmp_path / "hansen", caldor_hansen)
+
+
+@pytest.fixture
+def deforest_aoi(caldor_fixture, tmp_path):
+    """The central 40 x 40 pixels of the fixture window as a lon/lat GeoJSON, and its geometry."""
+    geometry = fixture_window_lonlat(caldor_fixture, DEFOREST_ROWS, DEFOREST_COLS)
+    return _feature_collection(tmp_path / "deforest_window.geojson", geometry, {"name": "deforest window"}), geometry
+
+
+def _unreachable_hansen(*args, **kwargs):
+    raise validate.ReferenceUnavailableError("storage.googleapis.com refused the request (403)")
+
+
+def test_deforest_end_to_end_on_the_caldor_fixture(
+    caldor_reader, caldor_store, deforest_aoi, deforest_hansen, tmp_path
+):
+    aoi_path, aoi = deforest_aoi
+    out = tmp_path / "out"
+    kwargs = {**DEFOREST_KW, "validate": True, "reader": caldor_reader, "hansen_url_template": deforest_hansen}
+    result = run_deforest(aoi_path, 2019, 2022, out, **kwargs)
+    assert isinstance(result, DeforestResult) and not result.skipped and result.validation_written
+    paths = result.paths
+    for p in (*paths.required(need_validation=True), *result.extra_paths.values()):
+        assert p.is_file(), p
+    assert sorted(p.name for p in out.iterdir()) == sorted(DEFOREST_FILES)
+
+    # The tif is a valid float32 COG with the four named bands, on the AOI's window.
+    ok, errors, _ = cog_validate(str(paths.tif))
+    assert ok, errors
+    plan = plan_aoi(caldor_reader, aoi)
+    (zp,) = plan.zones
+    with rasterio.open(paths.tif) as ds:
+        assert ds.descriptions == DEFOREST_BANDS
+        assert ds.dtypes == ("float32",) * 4 and np.isnan(ds.nodata)
+        assert ds.transform == zp.transform and ds.shape == zp.shape
+        prob_a, prob_b, dist, converted = ds.read()
+    inside = zp.mask
+    s = result.summary
+    assert s["aoi_pixels"] == plan.n_pixels == 1600 == s["classified_pixels"]
+    assert s["zones"] == ["10N"] and s["label_source"] == "hansen" and (s["year_a"], s["year_b"]) == (2019, 2022)
+    for band in (prob_a, prob_b):
+        assert np.isfinite(band[inside]).all() and np.isnan(band[~inside]).all()
+        assert band[inside].min() >= 0.0 and band[inside].max() <= 1.0
+    expected = metrics.cosine_distance_map(read_plan(caldor_reader, zp, 2019), read_plan(caldor_reader, zp, 2022))
+    np.testing.assert_allclose(dist[inside], expected[inside], atol=1e-6)
+    assert set(np.unique(converted[inside]).tolist()) == {0.0, 1.0}
+
+    # The conversion is the rule then the cleaning: forest in 2019, non-forest in 2022, beyond the cut.
+    cut = s["cross_check"]["cut"]
+    stable = inside & (prob_a >= 0.5) & (prob_b >= 0.5)
+    assert cut == pytest.approx(float(np.percentile(dist[stable].astype(np.float64), 95)), rel=1e-6)
+    assert s["cross_check"]["stable_forest_pixels"] == int(stable.sum()) >= dfr.MIN_STABLE_PIXELS
+    raw = inside & (prob_a >= 0.5) & (prob_b < 0.5) & (dist > cut)
+    flips = inside & (prob_a >= 0.5) & (prob_b < 0.5)
+    assert s["converted_pixels_before_cleaning"] == int(raw.sum())
+    assert s["cross_check"]["classifier_flips_below_cut"] == int((flips & ~raw).sum()) > 0
+    done = converted == 1
+    np.testing.assert_array_equal(done, metrics.clean_mask(raw, min_pixels=5) & inside)
+    assert s["converted_pixels"] == int(done.sum()) > 100 and s["min_pixels"] == 5
+    assert s["converted_ha"] == pytest.approx(done.sum() * 0.01)
+    forest_a, forest_b = int((prob_a[inside] >= 0.5).sum()), int((prob_b[inside] >= 0.5).sum())
+    assert s["forest"]["2019"] == {
+        "forest_ha": pytest.approx(forest_a * 0.01),
+        "forest_fraction": pytest.approx(forest_a / 1600),
+        "forest_pixels": forest_a,
+        "classified_pixels": 1600,
+    }
+    assert s["forest"]["2022"]["forest_pixels"] == forest_b < forest_a
+    assert s["conversion_fraction_of_forest"] == pytest.approx(done.sum() / forest_a)
+    sizes = metrics.component_sizes(done)
+    patches = s["patches"]
+    assert patches["count"] == sizes.size > 0 and sum(patches["histogram"].values()) == sizes.size
+    assert patches["max_ha"] == pytest.approx(sizes.max() * 0.01)
+    assert patches["median_ha"] == pytest.approx(float(np.median(sizes)) * 0.01)
+
+    # One summary row per year, the conversion columns repeated, the same in parquet and csv.
+    table = pd.read_parquet(paths.summary_parquet)
+    pd.testing.assert_frame_equal(table, pd.read_csv(paths.summary_csv), check_dtype=False)
+    assert table["year"].tolist() == [2019, 2022]
+    assert table["forest_ha"].tolist() == pytest.approx([forest_a * 0.01, forest_b * 0.01])
+    assert table["forest_fraction"].tolist() == pytest.approx([forest_a / 1600, forest_b / 1600])
+    for col, value in (
+        ("converted_ha", s["converted_ha"]),
+        ("conversion_fraction_of_forest", s["conversion_fraction_of_forest"]),
+        ("n_patches", sizes.size),
+        ("cross_check_cut", cut),
+        ("label_source", "hansen"),
+    ):
+        assert (table[col] == value).all(), col
+
+    # The labels: sampled in the ring, never inside the AOI, by the Hansen rules, held out by chunk.
+    labels = pd.read_parquet(result.extra_paths["labels"])
+    assert list(labels.columns) == LABEL_COLUMNS
+    assert len(labels) == 200 and int((labels["label"] == 1).sum()) == 100
+    assert not labels["inside_aoi"].any() and (labels["source"] == "hansen").all()
+    in_window = (
+        (labels["row"] >= zp.rows.start)
+        & (labels["row"] < zp.rows.stop)
+        & (labels["col"] >= zp.cols.start)
+        & (labels["col"] < zp.cols.stop)
+    )
+    picked = labels[in_window]
+    assert not zp.mask[picked["row"] - zp.rows.start, picked["col"] - zp.cols.start].any()
+    ring = dfr.label_ring(aoi, outer_km=0.1)
+    (rz,) = dfr.plan_label_ring(caldor_reader, ring, plan).zones
+    assert rz.mask[labels["row"] - rz.rows.start, labels["col"] - rz.cols.start].all()
+    layers = {
+        name: validate.hansen_layer(rz, name, url_template=deforest_hansen)
+        for name in ("treecover2000", "lossyear", "datamask")
+    }
+    classes = dfr.label_classes(layers["treecover2000"], layers["lossyear"], layers["datamask"], 2019)
+    assert (classes[labels["row"] - rz.rows.start, labels["col"] - rz.cols.start] == labels["label"]).all()
+    assert labels["used"].all() and (labels["regime"] == "radar").all() and (labels["drop_reason"] == "").all()
+    assert labels["fold"].between(0, 4).all() and labels["heldout_prob"].notna().all()
+    assert labels.groupby("source_chunk")["fold"].nunique().max() == 1
+    assert set(labels["source_chunk"]) <= set(s["labels"]["chunks"])
+    lab = s["labels"]
+    assert lab["used_forest"] == lab["used_nonforest"] == 100 and lab["chunks_used"] == len(lab["chunks"]) <= 24
+    assert lab["ring"]["outer_km"] == 0.1 and lab["ring"]["inner_km"] == 0.0 and lab["ring"]["zones"] == ["10N"]
+    clf = s["classifier"]
+    assert clf["labels"] == 200 and clf["heldout"]["folds"] == 5 and clf["heldout"]["folds_skipped"] == 0
+    assert clf["training"]["accuracy"] > 0.9 and 0.7 < clf["heldout"]["balanced_accuracy"] <= 1.0
+    radar = s["radar"]
+    assert radar["training_regime"] == "radar" and radar["regime_mismatch_pixels"] == 0
+    assert radar["probe"]["pixels_radar"] == 1600 and radar["labels_dropped_regime"] == 0
+
+    # Validation against Hansen loss in (2019, 2022], with the narrower 2022-only comparison.
+    val = json.loads(paths.validation.read_text())
+    assert set(val["scores"]) == {
+        "conversion",
+        "conversion_per_zone",
+        "conversion_year_b_only",
+        "forest_agreement_year_a",
+        "loss_year_breakdown",
+    }
+    breakdown = val["scores"]["loss_year_breakdown"]
+    assert sum(v["pixels"] for v in breakdown.values()) == 1600
+    lossyear = validate.hansen_layer(zp, "lossyear", url_template=deforest_hansen)
+    for year, row in breakdown.items():
+        code = 0 if year == "no_loss" else int(year) - 2000
+        here = inside & (lossyear == code)
+        assert row["pixels"] == int(here.sum()) and row["converted_share"] == pytest.approx(float(done[here].mean()))
+        assert row["flip_share"] == pytest.approx(float(flips[here].mean()))
+    conv = val["scores"]["conversion"]
+    assert conv["n"] == 1600 and conv["tp"] + conv["fp"] == s["converted_pixels"]
+    loss = validate.hansen_loss(zp, 2019, 2022, url_template=deforest_hansen)
+    assert conv["tp"] + conv["fn"] == int(loss.sum()) == s["validation"]["reference_pixels_in_aoi"]
+    assert s["validation"]["precision"] == conv["precision"] > 0.8 and conv["recall"] > 0.3
+    assert s["validation"]["iou"] == conv["iou"] and s["validation"]["pixels_scored"] == 1600
+    assert s["validation"]["year_b_only"]["precision"] <= conv["precision"]
+    assert 0.0 < s["validation"]["forest_agreement_year_a"]["accuracy"] <= 1.0
+    ref = val["reference"]
+    assert ref["source"] == "hansen" and ref["version"] == validate.HANSEN_VERSION and ref["label_source"] == "hansen"
+    assert ref["loss_window"]["lossyear_codes"] == [20, 21, 22] and ref["url_template"] == deforest_hansen
+    caveats = " ".join(val["caveats"])
+    for text in ("not independent", "30 m", "2022 alone", "salvage logging", "spatially held out", "Tree cover"):
+        assert text in caveats, text
+
+    report = json.loads(paths.report.read_text())
+    assert report == result.report and report["app"] == "deforest"
+    _, log = caldor_store
+    assert report["provenance"]["years"] == [2019, 2022] == years_in(log)
+    assert report["provenance"]["years_checked"] == [2019, 2022]
+    assert set(report["extra_outputs"]) == {"labels"}
+    assert 0 < report["bytes_read"] <= report["estimated_bytes"]
+    assert report["estimated_memory"] == dfr.memory_estimate(plan, block=(32, 32), ring_km=0.1)
+    assert report["params"]["hansen_url_template"] == deforest_hansen
+    assert report["params"]["hansen_version"] == validate.HANSEN_VERSION
+    assert set(report["timings"]) >= {"labels_read", "regime_probe", "classifier", "stream", "clean", "write"}
+    assert not report["warnings"]
+
+    # Rerunning with the same arguments skips without reading a chunk.
+    chunks_before = len(log.chunk_keys())
+    again = run_deforest(aoi_path, 2019, 2022, out, **kwargs)
+    assert again.skipped and again.report == report and again.validation_written
+    assert len(log.chunk_keys()) == chunks_before
+    # The same arguments elsewhere give the same outputs; another seed draws other labels.
+    twin = run_deforest(aoi_path, 2019, 2022, tmp_path / "twin", **kwargs)
+    assert twin.report["outputs"] == report["outputs"] and twin.report["extra_outputs"] == report["extra_outputs"]
+    reseeded = run_deforest(aoi_path, 2019, 2022, out, **kwargs, seed=1)
+    assert not reseeded.skipped and reseeded.report["args_digest"] != report["args_digest"]
+    other = pd.read_parquet(reseeded.extra_paths["labels"])
+    assert not other[["row", "col"]].equals(labels[["row", "col"]])
+    assert reseeded.report["provenance"]["seed"] == 1
+
+
+def test_deforest_with_a_labels_csv(
+    caldor_reader, caldor_store, caldor_fixture, deforest_aoi, deforest_hansen, tmp_path
+):
+    aoi_path, _ = deforest_aoi
+    hansen = run_deforest(
+        aoi_path,
+        2019,
+        2022,
+        tmp_path / "hansen_run",
+        reader=caldor_reader,
+        hansen_url_template=deforest_hansen,
+        **DEFOREST_KW,
+    )
+    sampled = pd.read_parquet(hansen.extra_paths["labels"])
+    rows = pd.concat([sampled[sampled["label"] == 1].head(30), sampled[sampled["label"] == 0].head(30)])
+    frame = rows[["lon", "lat", "label"]].assign(weight=2.0)
+    # Two hand labels inside the AOI and five in the store's no-data padding.
+    a, _, c, _, _, f = (float(v) for v in caldor_fixture["transform"])
+    to_ll = Transformer.from_crs(32610, 4326, always_xy=True)
+    extra = [(*to_ll.transform(c + 30.5 * a, f - 30.5 * a), 1), (*to_ll.transform(c + 31.5 * a, f - 31.5 * a), 1)]
+    extra += [(*to_ll.transform(c - 10.5 * a, f - (10.5 + i) * a), i % 2) for i in range(5)]
+    frame = pd.concat([frame, pd.DataFrame(extra, columns=["lon", "lat", "label"]).assign(weight=2.0)])
+    csv = tmp_path / "hand_labels.csv"
+    frame.to_csv(csv, index=False)
+    nowhere = str(tmp_path / "nowhere" / "Hansen_{version}_{layer}_{tile}.tif")
+    out = tmp_path / "csv_run"
+    kw = {**DEFOREST_KW, "labels": csv, "reader": caldor_reader, "hansen_url_template": nowhere}
+    result = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    s = result.summary
+    assert s["label_source"] == "csv"
+    lab = s["labels"]
+    assert lab["file"] == "hand_labels.csv" and lab["sha256"] == export.file_sha256(csv)
+    assert (lab["rows"], lab["inside_aoi"], lab["dropped_no_data"]) == (67, 2, 5)
+    assert lab["used_forest"] == 32 and lab["used_nonforest"] == 30
+    assert s["classifier"]["labels"] == 62 and s["classifier"]["weighted"] is False
+    written = pd.read_parquet(result.extra_paths["labels"])
+    back = pd.read_csv(csv)
+    np.testing.assert_array_equal(written["lon"].to_numpy(), back["lon"].to_numpy())
+    np.testing.assert_array_equal(written["label"].to_numpy(), back["label"].to_numpy())
+    assert (written["source"] == "csv").all() and int(written["inside_aoi"].sum()) == 2
+    assert (written["drop_reason"] == "no_data").sum() == 5 and not written.loc[~written["valid"], "used"].any()
+    assert (written["weight"] == 2.0).all()
+    assert any("lie inside the AOI" in w for w in result.report["warnings"])
+    assert (pd.read_csv(result.paths.summary_csv)["label_source"] == "csv").all()
+    assert s["hansen"]["labels"] is False
+    # Editing the labels file reruns.
+    assert run_deforest(aoi_path, 2019, 2022, out, **kw).skipped
+    csv.write_text(csv.read_text().replace(",2.0", ",1.0"), encoding="utf-8")
+    assert not run_deforest(aoi_path, 2019, 2022, out, **kw).skipped
+
+
+def test_deforest_validation_is_redone_from_the_outputs_without_reading(
+    caldor_reader, caldor_store, deforest_aoi, deforest_hansen, tmp_path, monkeypatch
+):
+    _, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    working = validate.hansen_loss
+    out = tmp_path / "out"
+    kw = {**DEFOREST_KW, "validate": True, "reader": caldor_reader, "hansen_url_template": deforest_hansen}
+    monkeypatch.setattr(validate, "hansen_loss", _unreachable_hansen)
+    first = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    assert not first.validation_written and not first.paths.validation.exists()
+    assert "storage.googleapis.com" in first.summary["validation"]["error"]
+    assert any(w.startswith("Validation skipped") for w in first.report["warnings"])
+    reads = len(log.chunk_keys())
+    again = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    assert again.skipped and not again.validation_written and again.report == first.report
+    assert len(log.chunk_keys()) == reads
+    monkeypatch.setattr(validate, "hansen_loss", working)
+    redone = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    assert redone.validation_redone and redone.validation_written and not redone.skipped
+    assert len(log.chunk_keys()) == reads
+    report = json.loads(redone.paths.report.read_text())
+    assert report == redone.report and report["args_digest"] == first.report["args_digest"]
+    assert report["validation_redone"]["bytes_read"] == 0 and "validation" in report["outputs"]
+    assert not any(w.startswith("Validation skipped") for w in report["warnings"])
+    full = run_deforest(aoi_path, 2019, 2022, tmp_path / "full", **kw)
+    redone_val = json.loads(redone.paths.validation.read_text())
+    full_val = json.loads(full.paths.validation.read_text())
+    assert redone_val["scores"] == full_val["scores"]
+    assert redone.summary["validation"] == full.summary["validation"]
+    assert any("redone" in c for c in redone_val["caveats"])
+    assert any("not independent" in c for c in redone_val["caveats"])
+    assert run_deforest(aoi_path, 2019, 2022, out, **kw).skipped
+
+
+def test_cli_deforest_runs_skips_and_validates(cli_reader, deforest_aoi, deforest_hansen, tmp_path, monkeypatch):
+    monkeypatch.setattr(validate, "HANSEN_URL_TEMPLATE", deforest_hansen)
+    aoi_path, _ = deforest_aoi
+    out = tmp_path / "cli_out"
+    args = ["deforest", "--aoi", str(aoi_path), "--year-a", "2019", "--year-b", "2022", "--out", str(out), "--validate"]
+    args += ["--label-ring-km", "0.1", "--labels-per-class", "100", "--min-area-ha", "0.05"]
+    runner = CliRunner()
+    first = runner.invoke(app, args)
+    assert first.exit_code == 0, (first.output, first.exception)
+    for text in (
+        "Deforest 2019 to 2022",
+        "Forest: 2019",
+        "Converted:",
+        "Cross-check:",
+        "Labels: Hansen",
+        "Classifier:",
+        "Validation (hansen)",
+        "against loss in 2022 only",
+        "forest proxy",
+        "Conversion patches by size",
+        "GB of chunks",
+    ):
+        assert text in first.stdout, text
+    report = json.loads((out / "deforest_report.json").read_text())
+    assert report["params"]["hansen_url_template"] == deforest_hansen
+    assert (out / "deforest_validation.json").is_file() and report["summary"]["validation"]["precision"] > 0.8
+    second = runner.invoke(app, args)
+    assert second.exit_code == 0, second.output
+    assert "current" in second.stdout and "--force" in second.stdout
+    assert json.loads((out / "deforest_report.json").read_text()) == report
+
+
+def test_cli_deforest_errors_exit_2_before_reading(cli_reader, caldor_store, deforest_aoi, tmp_path):
+    _, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    bad = tmp_path / "labels.csv"
+    bad.write_text("lon,lat,label\n-120.3,38.69,3\n", encoding="utf-8")
+    base = ["deforest", "--aoi", str(aoi_path), "--out", str(tmp_path / "o")]
+    cases = [
+        (["--year-a", "2019", "--year-b", "2022", "--labels", str(bad)], "labels.csv"),
+        (["--year-a", "2022", "--year-b", "2019"], "must be after year_a"),
+        (["--year-a", "2019", "--year-b", "2022", "--hansen-version", "v2"], "--hansen-version"),
+        (["--year-a", "2019", "--year-b", "2022", "--forest-prob", "1.5"], "forest_prob"),
+    ]
+    for extra, message in cases:
+        result = CliRunner().invoke(app, [*base, *extra])
+        assert result.exit_code == EXIT_USAGE, (extra, result.output)
+        assert message in result.stderr, (extra, result.stderr)
+    assert log.chunk_keys() == [] and not (tmp_path / "o" / "deforest_report.json").exists()
+
+
+def test_cli_deforest_strict_validate_stops_before_reading(
+    cli_reader, caldor_store, deforest_aoi, deforest_hansen, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(validate, "HANSEN_URL_TEMPLATE", deforest_hansen)
+    monkeypatch.setattr(validate, "hansen_loss", _unreachable_hansen)
+    _, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    out = tmp_path / "out"
+    args = ["deforest", "--aoi", str(aoi_path), "--year-a", "2019", "--year-b", "2022", "--out", str(out)]
+    args += ["--label-ring-km", "0.1", "--labels-per-class", "100", "--validate"]
+    strict = CliRunner().invoke(app, [*args, "--strict-validate"])
+    assert strict.exit_code == EXIT_VALIDATION, strict.output
+    assert "--strict-validate" in strict.stderr and "storage.googleapis.com" in strict.stderr
+    assert log.chunk_keys() == [] and not (out / "deforest_report.json").exists()
+    relaxed = CliRunner().invoke(app, args)
+    assert relaxed.exit_code == 0, relaxed.output
+    assert "Validation: not done" in relaxed.stdout and not (out / "deforest_validation.json").exists()
+
+
+def test_cli_deforest_forwards_every_option(monkeypatch, tmp_path):
+    seen = {}
+
+    def record(aoi, year_a, year_b, out, **kwargs):
+        seen.update(kwargs, aoi=aoi, year_a=year_a, year_b=year_b, out=out)
+        return DeforestResult(
+            report={"summary": {}},
+            paths=export.output_paths(Path(out), "deforest", year_a, year_b),
+            extra_paths={},
+            skipped=False,
+            validation_written=True,
+        )
+
+    monkeypatch.setattr("tessera_apps.apps.run_deforest", record)
+    ref = tmp_path / "r.geojson"
+    ref.write_text("{}")
+    labels = tmp_path / "l.csv"
+    labels.write_text("lon,lat,label\n")
+    args = ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022", "--out", str(tmp_path)]
+    args += ["--reference", str(ref), "--labels", str(labels), "--labels-per-class", "300", "--label-chunks", "12"]
+    args += ["--label-ring-km", "7.5", "--forest-cover", "60", "--nonforest-cover", "15", "--forest-prob", "0.6"]
+    args += ["--stable-percentile", "90", "--min-area-ha", "1.5", "--hansen-version", "GFC-2024-v1.12", "--seed", "4"]
+    args += ["--force", "--snapshot", "SNAP", "--i-know-this-is-large", "--strict-validate"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert seen["aoi"] == "rondonia" and (seen["year_a"], seen["year_b"], seen["out"]) == (2019, 2022, tmp_path)
+    assert seen["validate"] is True and seen["reference"] == ref and seen["labels"] == labels
+    assert (seen["labels_per_class"], seen["label_chunks"], seen["label_ring_km"]) == (300, 12, 7.5)
+    assert (seen["forest_cover"], seen["nonforest_cover"], seen["forest_prob"]) == (60, 15, 0.6)
+    assert (seen["stable_percentile"], seen["min_area_ha"], seen["hansen_version"]) == (90.0, 1.5, "GFC-2024-v1.12")
+    assert seen["seed"] == 4 and seen["force"] is True and seen["snapshot_id"] == "SNAP"
+    assert seen["max_area_km2"] is None and seen["strict_validate"] is True
+    seen.clear()
+    defaults = CliRunner().invoke(app, ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022"])
+    assert defaults.exit_code == 0, defaults.output
+    assert seen["validate"] is False and seen["reference"] is None and seen["labels"] is None
+    assert (seen["labels_per_class"], seen["label_chunks"], seen["label_ring_km"]) == (500, 24, 5.0)
+    assert (seen["forest_cover"], seen["nonforest_cover"], seen["forest_prob"]) == (50, 10, 0.5)
+    assert (seen["stable_percentile"], seen["min_area_ha"], seen["seed"]) == (95.0, 0.5, 0)
+    assert seen["hansen_version"] == validate.HANSEN_VERSION and seen["max_area_km2"] == 10_000
+    assert seen["snapshot_id"] is None and seen["force"] is False and seen["strict_validate"] is False
+    assert seen["out"] == Path("out")
+
+
+RONDONIA_WINDOW = box(-63.115, -8.675, -63.105, -8.665)  # about 1.1 x 1.1 km inside the Rondonia demo AOI
+
+
+@pytest.mark.network
+def test_deforest_live_window(tmp_path, monkeypatch):
+    for key in [k for k in os.environ if k.startswith("AWS_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
+    aoi = _feature_collection(tmp_path / "live.geojson", RONDONIA_WINDOW, {})
+    result = run_deforest(
+        aoi,
+        2019,
+        2022,
+        tmp_path / "out",
+        validate=True,
+        label_ring_km=1.0,
+        label_chunks=6,
+        labels_per_class=200,
+        snapshot_id=LIVE_SNAPSHOT,
+    )
+    s = result.summary
+    assert s["zones"] == ["20S"] and s["label_source"] == "hansen"
+    assert s["labels"]["chunks_used"] <= 6 and s["labels"]["used_forest"] >= 20 and s["labels"]["used_nonforest"] >= 20
+    assert s["classifier"]["heldout"]["folds"] >= 2
+    assert result.report["provenance"]["store"]["snapshot_id"] == LIVE_SNAPSHOT
+    assert 0 < result.report["bytes_read"] <= result.report["estimated_bytes"]
+    assert s["validation"]["source"] == "hansen" and s["validation"]["pixels_scored"] > 0

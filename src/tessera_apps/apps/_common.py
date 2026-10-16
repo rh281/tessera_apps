@@ -922,6 +922,91 @@ def zone_values_from_raster(path: Path | str, plan: AOIPlan, *, band: int) -> di
 # --------------------------------------------------------------------------------------------
 
 
+def spread_indices(n: int, k: int) -> list[int]:
+    """Up to ``k`` indices spread evenly over ``range(n)``, sorted and distinct (empty when n or k is 0)."""
+    if n <= 0 or k <= 0:
+        return []
+    return sorted({int(i) for i in np.linspace(0, n - 1, min(n, k)).round()})
+
+
+class BandMosaic:
+    """Float32 bands of per-zone results mosaicked across zones without holding a per-zone stack.
+
+    :func:`export.mosaic_zones` runs once, on an index band that holds each defined pixel's position
+    in the concatenated zone arrays (nodata elsewhere). Every band is then gathered through that
+    index into one preallocated array, so only one band per zone is alive at a time (survey S18) and
+    the reprojection runs once instead of once per band. Each mosaic pixel (seam fills included)
+    takes every band from the one source pixel whose index it holds. A single-zone AOI is written
+    on its own window directly.
+
+    Attributes:
+        data: ``(n_bands, H, W)`` float32, NaN where no band has a value; None once released.
+        transform: The mosaic's transform.
+        crs: The mosaic's CRS.
+    """
+
+    def __init__(
+        self,
+        plan: AOIPlan,
+        n_bands: int,
+        *,
+        dst_zone: str | None = None,
+        defined: Mapping[str, np.ndarray] | None = None,
+    ) -> None:
+        """Build the index band.
+
+        Args:
+            plan: The AOI plan.
+            n_bands: Bands the mosaic holds.
+            dst_zone: Zone whose grid the mosaic uses (default: the zone with the most AOI pixels).
+            defined: Bool mask per zone of the pixels any band may hold a value on; the plan's AOI
+                mask when None. Pixels outside it are NaN in every band.
+
+        Raises:
+            AOIError: The AOI windows hold too many pixels for an int32 index.
+        """
+        self.plan = plan
+        self.n_bands = int(n_bands)
+        self.sizes = [z.shape[0] * z.shape[1] for z in plan.zones]
+        self.take: np.ndarray | None = None
+        self.source: np.ndarray | None = None
+        if len(plan.zones) == 1:
+            z = plan.zones[0]
+            shape, self.transform, self.crs = z.shape, z.transform, z.grid.crs
+        else:
+            if sum(self.sizes) >= np.iinfo(np.int32).max:
+                raise io.AOIError("The AOI windows hold too many pixels to mosaic; split the AOI.")
+            if dst_zone is None:
+                dst_zone = max(plan.zones, key=lambda zp: zp.n_pixels).zone
+            pieces = []
+            offset = 0
+            for z, size in zip(plan.zones, self.sizes, strict=True):
+                index = np.arange(offset, offset + size, dtype=np.int32).reshape(z.shape)
+                keep = z.mask if defined is None else (np.asarray(defined[z.zone], dtype=bool) & z.mask)
+                pieces.append(GridArray(np.where(keep, index, np.int32(-1)), z))
+                offset += size
+            mosaic, self.transform, self.crs = export.mosaic_zones(pieces, dst_zone=dst_zone, nodata=-1)
+            del pieces
+            self.take = mosaic >= 0
+            self.source = mosaic[self.take]
+            shape = mosaic.shape
+            del mosaic
+        self.data: np.ndarray | None = np.full((self.n_bands, *shape), np.nan, dtype=np.float32)
+        self._defined = None if defined is None or len(plan.zones) > 1 else defined
+
+    def put(self, i: int, per_zone: Mapping[str, np.ndarray]) -> None:
+        """Mosaic band ``i`` from one float array per zone plan (NaN where there is no value)."""
+        if self.data is None:
+            raise ValueError("The mosaic has been released.")
+        if self.take is None or self.source is None:
+            z = self.plan.zones[0]
+            keep = z.mask if self._defined is None else (np.asarray(self._defined[z.zone], dtype=bool) & z.mask)
+            self.data[i] = np.where(keep, per_zone[z.zone], np.float32(np.nan))
+            return
+        flat = np.concatenate([np.asarray(per_zone[z.zone], dtype=np.float32).ravel() for z in self.plan.zones])
+        self.data[i][self.take] = flat[self.source]
+
+
 def stride_for_preview(shape: Sequence[int], max_side: int = export.PREVIEW_MAX_SIDE) -> int:
     """Step that strides an image of ``shape`` (rows, cols, ...) down to at most ``max_side`` per side.
 
@@ -968,6 +1053,7 @@ __all__ = [
     "FRAMEWORK_MODULES",
     "MEMORY_WARN_SHARE",
     "AppInputError",
+    "BandMosaic",
     "LoadedAOI",
     "RunContext",
     "StrictValidationError",
@@ -982,6 +1068,7 @@ __all__ = [
     "load_aoi",
     "mosaic_and_clean",
     "prepare_run",
+    "spread_indices",
     "stride_for_preview",
     "zone_values_from_raster",
 ]
