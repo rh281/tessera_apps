@@ -2456,3 +2456,154 @@ def natural_earth_coastline(
             elif part.geom_type in ("MultiLineString", "GeometryCollection"):
                 lines.extend(p for p in shapely.get_parts(part) if p.geom_type == "LineString" and not p.is_empty)
     return lines
+
+
+# --------------------------------------------------------------------------------------------
+# GLAD annual tree canopy height (the restore app's canopy check)
+# --------------------------------------------------------------------------------------------
+
+#: GLAD annual tree canopy height tile (Potapov et al.), in the Hansen bucket. ``{year}`` is 2015 to
+#: 2024 and ``{tile}`` the 10 degree tile's top-left corner, as for Hansen (``40N_120W``). Point it at
+#: local copies by passing ``url_template`` (a path with the same placeholders) to :func:`glad_tch`.
+GLAD_TCH_URL_TEMPLATE = (
+    "https://storage.googleapis.com/earthenginepartners-hansen/Annual_Layers_2015_2024/TCH/{year}/{tile}.tif"
+)
+#: Years GLAD annual tree canopy height covers.
+GLAD_TCH_YEARS = tuple(range(2015, 2025))
+#: Height (metres) of the shortest tree the layer maps: 0 means no tree of this height or more.
+GLAD_TCH_MIN_TREE_M = 5
+#: Value of the cached window's pixels that no tile covered (the layer itself stops below this).
+GLAD_TCH_NODATA = 255
+_GLAD_TCH_HINT = (
+    "Download the tiles by hand (https://storage.googleapis.com/earthenginepartners-hansen/"
+    "Annual_Layers_2015_2024/TCH/<year>/<tile>.tif) and pass url_template='/your/dir/{year}/{tile}.tif', or run "
+    "without the canopy check (--no-canopy)."
+)
+
+
+def _check_tch_year(year: int) -> int:
+    y = int(year)
+    if y not in GLAD_TCH_YEARS:
+        raise ValueError(
+            f"GLAD annual tree canopy height covers {GLAD_TCH_YEARS[0]} to {GLAD_TCH_YEARS[-1]}; {year} is outside it."
+        )
+    return y
+
+
+def _glad_tch_cache_file(year: int, bounds: tuple[float, float, float, float], url_template: str) -> Path:
+    """Build (once) and return the cached EPSG:4326 window of one year's canopy height.
+
+    Tiles are read as windows on the Hansen 0.00025 degree grid (:func:`_paste_tile`), as
+    :func:`hansen_layer` does. A tile that does not exist (HTTP 404, or no local file) leaves its
+    pixels at :data:`GLAD_TCH_NODATA`, which the cached GeoTIFF declares as nodata, so it reads as
+    not covered rather than as "no tree". A window no tile covers is not cached, so tiles that
+    appear later (a local copy added under the template) are found on the next call.
+
+    Raises:
+        ReferenceDataError: No tile exists over the window.
+    """
+    key = _cache_key({"template": url_template, "dataset": "glad_tch", "year": year, "bounds": bounds})
+    path = reference_dir("glad_tch") / str(year) / f"tch_{key}.tif"
+    west, south, east, north = bounds
+    width = round((east - west) / HANSEN_RES_DEG)
+    height = round((north - south) / HANSEN_RES_DEG)
+    if path.exists():
+        return path
+    mosaic = np.full((height, width), GLAD_TCH_NODATA, dtype=np.uint8)
+    found = 0
+    for tile in hansen_tiles(bounds):
+        src = url_template.format(year=year, tile=tile)
+        if _is_remote(src):
+            if not _exists(src, dataset="GLAD tree canopy height", hint=_GLAD_TCH_HINT):
+                logger.info("GLAD canopy height tile %s for %d does not exist; read as not covered.", tile, year)
+                continue
+        elif not Path(_gdal_path(src)).exists():
+            logger.info("GLAD canopy height tile %s for %d not found at %s; read as not covered.", tile, year, src)
+            continue
+        with (
+            rasterio.Env(**gdal_options()),
+            _open_raster(src, dataset="GLAD tree canopy height", hint=_GLAD_TCH_HINT) as ds,
+        ):
+            try:
+                _paste_tile(ds, mosaic, bounds)
+            except rasterio.errors.RasterioIOError as exc:
+                if _is_remote(src):
+                    raise _remote_read_error(src, "GLAD tree canopy height", _GLAD_TCH_HINT, exc) from exc
+                raise
+        found += 1
+    if found == 0:
+        raise ReferenceDataError(
+            f"No GLAD tree canopy height tile for {year} covers {bounds} (tiles {', '.join(hansen_tiles(bounds))} "
+            f"from {url_template}). {_GLAD_TCH_HINT}"
+        )
+    with atomic_path(path) as tmp:
+        profile = {
+            "driver": "GTiff",
+            "width": width,
+            "height": height,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": "EPSG:4326",
+            "transform": from_origin(west, north, HANSEN_RES_DEG, HANSEN_RES_DEG),
+            "nodata": GLAD_TCH_NODATA,
+            "compress": "deflate",
+            "tiled": width >= 256 and height >= 256,
+        }
+        with rasterio.open(tmp, "w", **profile) as dst:
+            dst.write(mosaic, 1)
+            dst.update_tags(year=str(year), bounds=json.dumps(bounds), tiles_found=str(found))
+    return path
+
+
+def glad_tch(plan: ZonePlan, year: int, *, url_template: str = GLAD_TCH_URL_TEMPLATE) -> np.ndarray:
+    """GLAD annual tree canopy height (Potapov et al.) for ``year`` on a zone plan's grid, in metres.
+
+    The layer is a Landsat and GEDI model at 30 m on the Hansen 0.00025 degree tiles (uint8 metres,
+    0 meaning no tree of :data:`GLAD_TCH_MIN_TREE_M` m or more), 2015 to 2024. It reuses the Hansen
+    machinery: the tiles the plan touches are read as windows through ``/vsicurl/`` (never downloaded
+    whole), mosaicked in EPSG:4326, cached under ``reference_dir("glad_tch")`` per (year, snapped
+    bbox, template), then reprojected onto the 10 m grid with nearest resampling. The layer sees only
+    trees of 5 m or more, so a young planting reads 0 for its first years.
+
+    Args:
+        plan: The zone plan.
+        year: 2015 to 2024.
+        url_template: Tile URL or local path with ``{year}`` and ``{tile}``.
+
+    Returns:
+        Float32 heights of ``plan.shape``; NaN outside ``plan.mask`` and where no tile exists.
+
+    Raises:
+        ValueError: ``year`` is outside 2015 to 2024.
+        ReferenceDataError: No tile of the layer exists over the plan.
+        ReferenceUnavailableError: A tile host could not be reached.
+    """
+    y = _check_tch_year(year)
+    path = _glad_tch_cache_file(y, _hansen_bounds(plan), url_template)
+    values, covered = _raster_on_plan(path, plan, band=1, resampling=Resampling.nearest)
+    out = values.astype(np.float32)
+    out[~(covered & plan.mask)] = np.nan
+    return out
+
+
+def glad_tch_reachable(
+    bbox: tuple[float, float, float, float], year: int, *, url_template: str = GLAD_TCH_URL_TEMPLATE
+) -> int:
+    """How many GLAD canopy height tiles for ``year`` exist over a lon/lat bbox, checked without reading them.
+
+    A remote tile costs one HEAD request; a local one a file check. The restore app calls this to
+    decide whether a canopy check that failed earlier can now be done.
+
+    Raises:
+        ValueError: ``year`` is outside 2015 to 2024, or the bbox is not lon/lat.
+        ReferenceUnavailableError: The tile host could not be reached.
+    """
+    y = _check_tch_year(year)
+    found = 0
+    for tile in hansen_tiles(_check_bbox(bbox)):
+        src = url_template.format(year=y, tile=tile)
+        if _is_remote(src):
+            found += int(_exists(src, dataset="GLAD tree canopy height", hint=_GLAD_TCH_HINT))
+        else:
+            found += int(Path(_gdal_path(src)).exists())
+    return found

@@ -1784,3 +1784,154 @@ def test_wetland_live_window(tmp_path, monkeypatch):
     assert "same product" in " ".join(json.loads(result.paths.validation.read_text())["caveats"])
     assert s["coastal"]["source"] == "natural_earth_10m" and s["coastal"]["approximate"] is True
     assert s["coastal_fraction_year_a"] is not None and s["storm_note"] and "Irma" in s["storm_note"]
+
+
+# --------------------------------------------------------------------------------------------
+# restore
+# --------------------------------------------------------------------------------------------
+
+RESTORE_SITE = ((44, 56), (44, 56))
+RESTORE_TARGET = ((2, 14), (2, 14))
+RESTORE_KW = {"ring_inner_km": 0.03, "ring_outer_km": 0.2, "block": (32, 32)}
+
+
+@pytest.fixture
+def restore_inputs(caldor_fixture, tmp_path, monkeypatch):
+    """A site in the burned south-east of the fixture, a target stand in its less burned north-west, and canopy tiles.
+
+    The GLAD canopy height tiles cover the fixture window: 25 m everywhere, 0 m from 2022 where 2020 and 2022 differ.
+    """
+    from .conftest import write_tch_tiles
+
+    monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
+    fx = caldor_fixture
+    a, _, c, _, _, f = (float(v) for v in fx["transform"])
+    site = _feature_collection(tmp_path / "site.geojson", fixture_window_lonlat(fx, *RESTORE_SITE), {"name": "site"})
+    target = _feature_collection(
+        tmp_path / "target.geojson", fixture_window_lonlat(fx, *RESTORE_TARGET), {"name": "mature stand"}
+    )
+    years = [int(y) for y in fx["years"]]
+    emb = fx["embeddings"]
+    burned = metrics.cosine_similarity(emb[years.index(2020)], emb[years.index(2022)]) < 0.75
+    heights = {y: np.where(burned & (y >= 2022), 0, 25).astype(np.uint8) for y in range(2015, 2025)}
+    template = write_tch_tiles(tmp_path / "tch", int(fx["epsg"]), c, f, heights)
+    return site, target, template
+
+
+RESTORE_FILES = (
+    "restore_2021_2025.tif",
+    "restore_summary.parquet",
+    "restore_summary.csv",
+    "restore_placebos.parquet",
+    "restore_preview.png",
+    "restore_report.json",
+    "restore_validation.json",
+)
+RESTORE_COLUMNS = (
+    "year",
+    "post_planting",
+    "divergence",
+    "divergence_change",
+    "placebo_p05",
+    "placebo_p50",
+    "placebo_p95",
+    "significant",
+    "null_divergence_change",
+    "departed_fraction",
+    "closer_to_target_fraction",
+    "control_closer_to_target_fraction",
+    "target_similarity",
+    "control_target_similarity",
+    "target_halves_similarity",
+    "target_progress",
+    "site_radar_free_fraction",
+    "n_site",
+    "n_control",
+    "n_target",
+    "verdict",
+    "site_tch_mean",
+    "control_tch_mean",
+    "site_tall_share",
+    "control_tall_share",
+    "target_tch_mean",
+    "target_tall_share",
+)
+
+
+def test_restore_end_to_end_on_the_caldor_fixture(caldor_reader, caldor_store, restore_inputs, tmp_path):
+    from tessera_apps.apps import RestoreResult
+    from tessera_apps.apps import restore as rs
+
+    site, target, template = restore_inputs
+    out = tmp_path / "out"
+    kwargs = {**RESTORE_KW, "target": target, "validate": True, "tch_url_template": template, "reader": caldor_reader}
+    result = rs.run_restore(site, out, planted=2022, **kwargs)
+    assert isinstance(result, RestoreResult) and not result.skipped and result.validation_written
+    assert sorted(p.name for p in out.iterdir()) == sorted(RESTORE_FILES)
+    for p in (*result.paths.required(need_validation=True), *result.extra_paths.values()):
+        assert p.is_file(), p
+    s = result.summary
+    years = [2021, 2022, 2023, 2024, 2025]
+    assert s["years"] == years and s["planted"] == 2022 and s["post_planting_years"] == years[1:]
+    # The site burned in 2021 like much of its ring, and nothing was planted here: no divergence, as the null pair.
+    assert s["verdict"] == "no divergence detected" and s["null_test"]["null_verdict"] == "no divergence detected"
+    assert s["site"]["pixels"] == 144 and s["zones"] == ["10N"]
+
+    # A valid float32 COG with named bands over the site plus ring.
+    ok, errors, _ = cog_validate(str(result.paths.tif))
+    assert ok, errors
+    names = ("role", "baseline_similarity", *[f"similarity_to_control_{y}" for y in years], "closer_to_target_2025")
+    with rasterio.open(result.paths.tif) as ds:
+        assert ds.descriptions == names and ds.dtypes == ("float32",) * len(names) and np.isnan(ds.nodata)
+        role = ds.read(1)
+    codes = set(np.unique(role[np.isfinite(role)]).astype(int))
+    assert {rs.ROLE_SITE, rs.ROLE_CONTROL} <= codes <= {1, 2, 3, 4, 5}
+    assert int((role == rs.ROLE_SITE).sum()) == s["site"]["pixels_used"]
+
+    # One summary row per year, the same in parquet and csv; the verdict repeated so the csv stands alone.
+    table = pd.read_parquet(result.paths.summary_parquet)
+    pd.testing.assert_frame_equal(table, pd.read_csv(result.paths.summary_csv), check_dtype=False)
+    assert tuple(table.columns) == RESTORE_COLUMNS and table["year"].tolist() == years
+    assert set(table["verdict"]) == {s["verdict"]}
+    assert table["post_planting"].tolist() == [False, True, True, True, True]
+    assert table["divergence_change"].iloc[0] == 0.0 and table["placebo_p95"].iloc[0] == 0.0
+    assert np.isnan(table["site_tch_mean"].iloc[-1]) and table["control_tch_mean"].iloc[:-1].notna().all()
+
+    # The placebos: one row per placebo and year, their band is the summary's.
+    placebos = pd.read_parquet(result.extra_paths["placebos"])
+    assert len(placebos) == 200 * len(years) and placebos["placebo"].nunique() == 200
+    band = placebos.pivot(index="placebo", columns="year", values="divergence_change").to_numpy()
+    np.testing.assert_allclose(np.percentile(band, 95, axis=0), table["placebo_p95"], atol=1e-12)
+    np.testing.assert_allclose(np.percentile(band, 5, axis=0), table["placebo_p05"], atol=1e-12)
+    rate = placebos.groupby("placebo")["verdict"].first().str.startswith("diverging").mean()
+    assert s["placebos"]["false_positive_rate"] == pytest.approx(rate)
+
+    # The validation file: the null test and the canopy check, with their caveats.
+    val = json.loads(result.paths.validation.read_text())
+    assert set(val) == {"scores", "reference", "caveats"} and set(val["scores"]) == {"null_test", "canopy"}
+    null = val["scores"]["null_test"]
+    for key in ("null_verdict", "null_max_abs_change", "site_max_abs_change", "null_to_site_ratio", "null_near_zero"):
+        assert key in null, key
+    canopy = val["scores"]["canopy"]
+    assert canopy["years"] == [2021, 2022, 2023, 2024] and "canopy_onset_year" in canopy
+    assert canopy["per_year"]["2021"]["site_mean_m"] == 25.0 and canopy["per_year"]["2023"]["site_mean_m"] < 25.0
+    assert "not an accuracy" in " ".join(val["caveats"])
+
+    # The report: provenance of the site, the extra output, the bytes.
+    report = json.loads(result.paths.report.read_text())
+    assert report == result.report and report["app"] == "restore"
+    assert report["aoi"]["sha256"] == export.file_sha256(site) and report["params"]["target"]["sha256"]
+    assert set(report["extra_outputs"]) == {"placebos"}
+    assert 0 < report["bytes_read"] <= report["estimated_bytes"]
+    _, log = caldor_store
+    assert report["provenance"]["years"] == years == years_in(log)
+
+    # Rerunning with the same arguments skips without reading a chunk; --force reruns.
+    chunks = len(log.chunk_keys())
+    again = rs.run_restore(site, out, planted=2022, **kwargs)
+    assert again.skipped and again.report == report and again.validation_written
+    assert len(log.chunk_keys()) == chunks
+    forced = rs.run_restore(site, out, planted=2022, force=True, **kwargs)
+    assert not forced.skipped and len(log.chunk_keys()) > chunks
+    assert forced.report["summary"]["verdict"] == s["verdict"]
+    assert forced.report["outputs"] == report["outputs"]

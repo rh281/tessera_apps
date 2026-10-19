@@ -744,3 +744,235 @@ def wetland(
     _print_wetland(result.report, skipped=result.skipped, out=out, validation_redone=result.validation_redone)
     if do_validate and not result.validation_written and strict_validate:
         raise _fail("Error: --strict-validate is set and the validation reference was not loaded.", EXIT_VALIDATION)
+
+
+def _print_restore(report: Mapping[str, Any], *, skipped: bool, out: Path) -> None:
+    """The run summary: the verdict on top, the trajectory table, control, regime, placebos, null test, canopy, cost.
+
+    Every value that comes from the user or the outside (paths, error text, warnings) is escaped, so
+    a bracket in it is printed, not read as rich markup.
+    """
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.table import Table
+
+    def e(value: Any) -> str:  # noqa: ANN401
+        return escape(str(value))
+
+    console = Console()
+    s = report.get("summary") or {}
+    if skipped:
+        console.print(f"Outputs in {e(out)} are current for these arguments; pass --force to rerun.")
+    console.print(f"[bold]Verdict: {e(s.get('verdict'))}[/bold]")
+    console.print(f"  {e(s.get('verdict_detail'))}")
+    site = s.get("site") or {}
+    console.print(
+        f"Restore, planted {e(s.get('planted'))}, years {e(s.get('year_a'))} to {e(s.get('year_b'))}; site "
+        f"{e(site.get('source'))}: {_fmt(site.get('area_ha'), ',.1f')} ha, {_fmt(site.get('pixels_used'), ',')} of "
+        f"{_fmt(site.get('pixels'), ',')} pixels used, in {e(', '.join(s.get('zones') or []))}"
+    )
+    table = Table(title="Trajectory (divergence from control, change since the baseline, placebo band)")
+    columns = (
+        ("year", "year", "d"),
+        ("post", "post_planting", "b"),
+        ("D", "divergence", ".4g"),
+        ("dD", "divergence_change", ".4g"),
+        ("p05", "placebo_p05", ".4g"),
+        ("p50", "placebo_p50", ".4g"),
+        ("p95", "placebo_p95", ".4g"),
+        ("sig", "significant", "b"),
+        ("null dD", "null_divergence_change", ".4g"),
+        ("departed", "departed_fraction", ".1%"),
+        ("closer to target", "closer_to_target_fraction", ".1%"),
+        ("progress", "target_progress", ".2f"),
+        ("radar-free", "site_radar_free_fraction", ".0%"),
+    )
+    for name, _key, _spec in columns:
+        table.add_column(name, justify="right")
+    for row in s.get("trajectory") or []:
+        cells = []
+        for _name, key, spec in columns:
+            value = row.get(key)
+            if spec == "b":
+                cells.append("yes" if value else "no")
+            elif spec == "d":
+                cells.append(e(value))
+            else:
+                cells.append(_fmt(value, spec))
+        table.add_row(*cells)
+    console.print(table)
+    ctrl = s.get("control") or {}
+    if ctrl.get("source") == "ring":
+        console.print(
+            f"Control: ring {_fmt(ctrl.get('ring_inner_km'), 'g')} to {_fmt(ctrl.get('ring_outer_km'), 'g')} km, "
+            f"{_fmt(ctrl.get('kept_pixels'), ',')} of {_fmt(ctrl.get('candidate_pixels_valid_year_a'), ',')} pixels "
+            f"kept at a baseline similarity of {_fmt(ctrl.get('threshold_similarity'), '.4f')} or more ("
+            + ("held-out" if ctrl.get("threshold_source") == "heldout" else "in-sample, fallback")
+            + f" {_fmt(ctrl.get('control_pct'), 'g')}th percentile, {e(ctrl.get('folds'))} folds of "
+            f"{e(ctrl.get('site_cells'))} cells)"
+        )
+    else:
+        console.print(
+            f"Control: {e(ctrl.get('file'))}, {_fmt(ctrl.get('kept_pixels'), ',')} pixels used as given; "
+            f"{_fmt(ctrl.get('share_below_threshold'), '.0%')} of them below the held-out threshold "
+            f"{_fmt(ctrl.get('threshold_similarity'), '.4f')}"
+        )
+    balance = ctrl.get("balance") or {}
+    console.print(
+        f"  baseline divergence {_fmt(balance.get('baseline_divergence'), '.5f')}, above "
+        f"{_fmt(balance.get('baseline_divergence_rank'), '.0%')} of the placebos' (median "
+        f"{_fmt(balance.get('placebo_baseline_divergence_p50'), '.5f')})"
+    )
+    regime = s.get("regime") or {}
+    dropped = regime.get("dropped") or {}
+    console.print(
+        "Panel and radar regime: "
+        + "; ".join(
+            f"{e(role)} {_fmt(d.get('used'), ',')} used, {_fmt(d.get('panel'), ',')} without data some year, "
+            f"{_fmt(d.get('regime'), ',')} other radar pattern"
+            for role, d in dropped.items()
+            if d.get("read")
+        )
+    )
+    if regime.get("radar_free_years"):
+        console.print(f"  radar-free years in the majority pattern: {e(regime['radar_free_years'])}")
+    placebos = s.get("placebos") or {}
+    trend = s.get("trend") or {}
+    console.print(
+        f"Placebos: {e(placebos.get('count'))} of {e(placebos.get('pixels_each'))} pixels; false positive rate "
+        f"{_fmt(placebos.get('false_positive_rate'), '.1%')}. Trend after planting: Theil-Sen "
+        f"{_fmt(trend.get('theil_sen_slope'), '.4f')} per year, Spearman rho {_fmt(trend.get('spearman_rho'), '.2f')}"
+    )
+    null = s.get("null_test") or {}
+    if null.get("error"):
+        console.print(f"Null test: not run ({e(null['error'])})")
+    else:
+        console.print(
+            f"Null test (control halves): {e(null.get('null_verdict'))}, max change "
+            f"{_fmt(null.get('null_max_abs_change'), '.5f')} against the site's "
+            f"{_fmt(null.get('site_max_abs_change'), '.5f')} (ratio {_fmt(null.get('null_to_site_ratio'), '.3f')}), "
+            f"near zero: {e(null.get('null_near_zero'))}"
+        )
+    target = s.get("target")
+    if isinstance(target, Mapping):
+        console.print(
+            f"Target: {_fmt(target.get('pixels'), ',')} pixels; progress is unclipped "
+            "(0 is the control's similarity to the target, 1 the target's own halves')"
+        )
+    canopy = s.get("canopy")
+    if isinstance(canopy, Mapping):
+        if canopy.get("error"):
+            console.print(f"Canopy check: not done ({e(canopy['error'])})")
+        else:
+            console.print(
+                f"Canopy check (GLAD tree canopy height {e((canopy.get('years') or [None])[0])} to "
+                f"{e((canopy.get('years') or [None])[-1])}): onset year {e(canopy.get('canopy_onset_year'))}, "
+                f"Pearson {_fmt(canopy.get('pearson_divergence_vs_mean_gap_change'), '.2f')} and Spearman "
+                f"{_fmt(canopy.get('spearman_divergence_vs_mean_gap_change'), '.2f')} between dD and the mean height "
+                "gap change"
+            )
+    console.print(f"Limitation: {e(s.get('limitation'))}")
+    wall = (report.get("timings") or {}).get("wall_s")
+    cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
+    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    for warning in report.get("warnings") or []:
+        console.print(f"[yellow]Warning:[/yellow] {e(warning)}", markup=True)
+
+
+@app.command()
+def restore(
+    aoi: Annotated[
+        str,
+        typer.Option(
+            "--aoi", "--site", help="The site polygon (GeoJSON, GeoPackage, shapefile; any CRS) or a demo name."
+        ),
+    ],
+    planted: Annotated[
+        int | None, typer.Option("--planted", help="Planting year (a demo site's properties may give it).")
+    ] = None,
+    year_a: Annotated[
+        int | None, typer.Option("--year-a", help="Baseline year, before planting (default: planted - 1).")
+    ] = None,
+    year_b: Annotated[int | None, typer.Option("--year-b", help="Last year (default: 2025).")] = None,
+    control: Annotated[
+        str | None,
+        typer.Option("--control", help="A control polygon used as given (no filter), or 'demo'; the ring otherwise."),
+    ] = None,
+    target: Annotated[
+        str | None, typer.Option("--target", help="A mature reference stand (polygon), or 'demo'.")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = DEFAULT_OUT,
+    validate: Annotated[
+        bool, typer.Option("--validate", help="Write the validation file: the null test and the canopy check.")
+    ] = False,
+    canopy: Annotated[
+        bool, typer.Option("--canopy/--no-canopy", help="With --validate, check against GLAD tree canopy height.")
+    ] = True,
+    ring_inner_km: Annotated[float, typer.Option("--ring-inner-km", help="Inner edge of the control ring.")] = 1.0,
+    ring_outer_km: Annotated[
+        float, typer.Option("--ring-outer-km", help="Outer edge of the control ring, at most 10 km.")
+    ] = 3.0,
+    control_pct: Annotated[
+        float,
+        typer.Option(
+            "--control-pct", help="Percentile of the held-out site similarities that sets the control filter."
+        ),
+    ] = 5.0,
+    folds: Annotated[int, typer.Option("--folds", help="Spatial folds of the site's pixels.")] = 5,
+    fold_cell_m: Annotated[
+        float, typer.Option("--fold-cell-m", help="Grid cell (metres) that blocks the site's pixels into folds.")
+    ] = 200.0,
+    placebos: Annotated[int, typer.Option("--placebos", help="Placebo pseudo-sites drawn from the control.")] = 200,
+    min_post_years: Annotated[int, typer.Option("--min-post-years", help="Post-planting years the verdict needs.")] = 3,
+    seed: Annotated[int, typer.Option("--seed", help="Seed of the folds, the placebos and the target halves.")] = 0,
+    force: Annotated[bool, typer.Option("--force", help="Rerun even when the outputs are current.")] = False,
+    snapshot: Annotated[str | None, typer.Option("--snapshot", help="Pin an Icechunk snapshot id.")] = None,
+    i_know_this_is_large: Annotated[
+        bool, typer.Option("--i-know-this-is-large", help="Lift the 10,000 km2 limit on the extent and the target.")
+    ] = False,
+    strict_validate: Annotated[
+        bool,
+        typer.Option(
+            "--strict-validate",
+            help="Stop with exit code 3, before reading any chunk, when --validate cannot load the canopy layer.",
+        ),
+    ] = False,
+) -> None:
+    """Is a restoration site diverging from a matched control the way a working project should?"""
+    from tessera_apps import io
+    from tessera_apps.apps import AppInputError, StrictValidationError, run_restore
+
+    with _rich_logging():
+        try:
+            result = run_restore(
+                aoi,
+                out,
+                planted=planted,
+                year_a=year_a,
+                year_b=year_b,
+                control=control,
+                target=target,
+                validate=validate,
+                canopy=canopy,
+                ring_inner_km=ring_inner_km,
+                ring_outer_km=ring_outer_km,
+                control_pct=control_pct,
+                folds=folds,
+                fold_cell_m=fold_cell_m,
+                placebos=placebos,
+                min_post_years=min_post_years,
+                seed=seed,
+                force=force,
+                max_area_km2=None if i_know_this_is_large else io.MAX_AOI_KM2,
+                snapshot_id=snapshot,
+                strict_validate=strict_validate and validate,
+            )
+        except StrictValidationError as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_VALIDATION) from exc
+        except (AppInputError, io.TesseraError) as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_USAGE) from exc
+    _print_restore(result.report, skipped=result.skipped, out=out)
+    if validate and canopy and strict_validate:
+        canopy_rec = (result.report.get("summary") or {}).get("canopy")
+        if isinstance(canopy_rec, Mapping) and canopy_rec.get("error"):
+            raise _fail("Error: --strict-validate is set and the canopy check could not be done.", EXIT_VALIDATION)
