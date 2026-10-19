@@ -6,8 +6,10 @@
    "properties": {
     "name": "Ten Thousand Islands and Everglades mangrove coast demo AOI",
     "source": "Box over the Ten Thousand Islands, Florida (Collier County), the mangrove coast between Everglades City and the northern edge of Everglades National Park",
-    "year_a": 2018,
+    "year_a": 2020,
     "year_b": 2024,
+    "years_note": "year_a is 2020, not the brief's 2018: ESA WorldCover, the mangrove reference this build can reach, exists for 2020 and 2021 only, and the brief's 2018 needs Global Mangrove Watch v3, whose host (zenodo.org) is blocked here.",
+    "seeds": "everglades_seeds",
     "role": "aoi"
    },
    "geometry": {

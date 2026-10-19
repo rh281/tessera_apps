@@ -17,6 +17,8 @@ Dataset loaders (survey section "Reference dataset endpoints"):
 - **Hansen GFC** (global forest loss): :func:`hansen_layer`, :func:`hansen_loss`,
   :func:`hansen_forest`, :func:`hansen_valid`, read as windows over ``/vsicurl/``.
 - **Global Mangrove Watch**: :func:`gmw_extent`, :func:`gmw_coverage`, from Zenodo or a local copy.
+- **ESA WorldCover** 2020 (v100) and 2021 (v200) land cover: :func:`worldcover_map`,
+  :func:`worldcover_classes`, :func:`worldcover_valid`, read as windows over ``/vsicurl/``.
 - **Natural Earth** coastline: :func:`natural_earth_coastline`.
 - **USFS FACTS** reforestation polygons: :func:`usfs_reforestation` (a demo site source, not a
   validation reference).
@@ -31,6 +33,7 @@ cannot be reached, the error names the host and says how to supply the data by h
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import http.client
 import json
@@ -39,12 +42,13 @@ import math
 import os
 import re
 import ssl
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -88,6 +92,35 @@ HANSEN_RES_DEG = 0.00025
 #: Default canopy cover threshold (percent) for the Hansen forest proxy.
 HANSEN_FOREST_THRESHOLD = 30
 _HANSEN_MARGIN_DEG = 0.001
+
+#: ESA WorldCover map tile URL on AWS Open Data. ``{tile}`` is the 3 x 3 degree tile's lower-left
+#: corner, for example ``N24W084``. Point it at local copies by passing ``url_template`` (a path with
+#: the same placeholders) to the loaders.
+WORLDCOVER_URL_TEMPLATE = (
+    "https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/"
+    "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
+)
+#: The WorldCover maps that exist: one per year, each its own product version.
+WORLDCOVER_VERSIONS = {2020: "v100", 2021: "v200"}
+#: WorldCover pixels per degree: 1/12000 degree, about 9.3 m north to south.
+WORLDCOVER_PIXELS_PER_DEG = 12000
+#: The WorldCover legend (uint8 codes; 0 is no data).
+WORLDCOVER_CLASSES = {
+    10: "tree cover",
+    20: "shrubland",
+    30: "grassland",
+    40: "cropland",
+    50: "built-up",
+    60: "bare or sparse vegetation",
+    70: "snow and ice",
+    80: "permanent water bodies",
+    90: "herbaceous wetland",
+    95: "mangroves",
+    100: "moss and lichen",
+}
+#: WorldCover's mangrove class.
+WORLDCOVER_MANGROVE = 95
+_WORLDCOVER_MARGIN_DEG = 0.001
 
 #: NIFC InterAgency Fire Perimeter History, all years (ArcGIS FeatureServer layer).
 NIFC_HISTORY_URL = (
@@ -134,6 +167,12 @@ _HINTS = {
         "Download the tiles by hand (https://storage.googleapis.com/earthenginepartners-hansen/{version}/"
         "download.html) and pass url_template='/your/dir/Hansen_{{version}}_{{layer}}_{{tile}}.tif', "
         "or pass a reference raster with --reference."
+    ),
+    "ESA WorldCover": (
+        "Download the map tiles by hand (https://esa-worldcover.org/en/data-access, or the AWS Open Data "
+        "bucket s3://esa-worldcover) and pass "
+        "url_template='/your/dir/ESA_WorldCover_10m_{{year}}_{{version}}_{{tile}}_Map.tif', or pass a reference "
+        "with --reference."
     ),
     "GMW": (
         "Download the GMW {version} files by hand from https://zenodo.org/records/{record} and pass the file "
@@ -1644,6 +1683,310 @@ def hansen_forest(
     loss = hansen_layer(plan, "lossyear", version=version, url_template=url_template)
     lost = (loss >= 1) & (loss <= year - 2000)
     return (cover >= threshold) & ~lost & plan.mask
+
+
+# --------------------------------------------------------------------------------------------
+# ESA WorldCover
+# --------------------------------------------------------------------------------------------
+
+
+def _check_worldcover_year(year: int) -> str:
+    """The WorldCover version of ``year``; any other year raises, naming the two years that exist."""
+    version = WORLDCOVER_VERSIONS.get(int(year))
+    if version is None:
+        have = " and ".join(f"{y} ({v})" for y, v in WORLDCOVER_VERSIONS.items())
+        raise ValueError(
+            f"ESA WorldCover exists for {have} only, not {year}. Score other years against GMW or a --reference file."
+        )
+    return version
+
+
+def _check_worldcover_classes(classes: Collection[int]) -> list[int]:
+    """``classes`` as a sorted list of WorldCover class codes; unknown codes raise, naming the legend."""
+    codes = sorted({int(c) for c in classes})
+    if not codes:
+        raise ValueError("Pass at least one WorldCover class code, for example 95 (mangroves).")
+    unknown = [c for c in codes if c not in WORLDCOVER_CLASSES]
+    if unknown:
+        legend = ", ".join(f"{k} {name}" for k, name in WORLDCOVER_CLASSES.items())
+        raise ValueError(f"WorldCover has no class {unknown}; its classes are {legend}.")
+    return codes
+
+
+def _worldcover_tile_name(south: int, west: int) -> str:
+    return f"{'N' if south >= 0 else 'S'}{abs(south):02d}{'E' if west >= 0 else 'W'}{abs(west):03d}"
+
+
+def _clamp_corner(south: int, west: int) -> tuple[int, int]:
+    return max(-90, min(south, 87)), max(-180, min(west, 177))
+
+
+def worldcover_tile(lon: float, lat: float) -> str:
+    """WorldCover tile holding a point, named by its lower-left corner, for example ``"N24W084"``.
+
+    Tiles are 3 x 3 degrees: ``N24W084`` covers latitude 24 to 27 and longitude -84 to -81.
+    LON = floor(lon / 3) * 3 and LAT = ceil(lat / 3) * 3 - 3, the pixel rule of a north-up raster: a
+    point on a tile's west edge belongs to that tile, and a point on a latitude edge to the tile
+    whose top edge it lies on (as :func:`hansen_tile` does).
+
+    Raises:
+        ValueError: The point is not finite or outside lon -180 to 180, lat -90 to 90.
+    """
+    if not (math.isfinite(lon) and math.isfinite(lat) and -180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+        raise ValueError(f"({lon}, {lat}) is not a lon/lat point.")
+    south, west = _clamp_corner(math.ceil(lat / 3.0) * 3 - 3, math.floor(lon / 3.0) * 3)
+    return _worldcover_tile_name(south, west)
+
+
+def worldcover_tiles(bbox: tuple[float, float, float, float]) -> list[str]:
+    """WorldCover tiles a lon/lat bbox overlaps with positive area, north to south then west to east.
+
+    A bbox edge lying exactly on a tile edge does not pull in the neighbouring tile. A bbox with zero
+    width or height uses the point rule of :func:`worldcover_tile` on that axis.
+
+    Raises:
+        ValueError: The bbox is not lon/lat ``(west, south, east, north)``.
+    """
+    if len(bbox) != 4:
+        raise ValueError(f"bbox must be (west, south, east, north); got {bbox!r}.")
+    west, south, east, north = (float(v) for v in bbox)
+    if not all(math.isfinite(v) for v in (west, south, east, north)):
+        raise ValueError(f"bbox {bbox!r} is not finite.")
+    if not (-180.0 <= west <= east <= 180.0 and -90.0 <= south <= north <= 90.0):
+        raise ValueError(f"bbox {bbox!r} must be lon/lat (west, south, east, north).")
+    if south < north:
+        souths = list(range(math.floor(south / 3.0) * 3, math.ceil(north / 3.0) * 3, 3))
+    else:
+        souths = [math.ceil(south / 3.0) * 3 - 3]
+    if west < east:
+        wests = list(range(math.floor(west / 3.0) * 3, math.ceil(east / 3.0) * 3, 3))
+    else:
+        wests = [math.floor(west / 3.0) * 3]
+    corners = [_clamp_corner(s, w) for s in souths for w in wests]
+    rows = sorted({s for s, _ in corners}, reverse=True)
+    cols = sorted({w for _, w in corners})
+    return [_worldcover_tile_name(s, w) for s in rows for w in cols]
+
+
+def _worldcover_pixels(plan: ZonePlan) -> tuple[int, int, int, int]:
+    """The plan window's lon/lat bounds plus a margin, as whole WorldCover pixels from 0 lon, 0 lat.
+
+    Returns ``(x0, y0, x1, y1)``: columns ``x0`` to ``x1`` east of the prime meridian and rows ``y0`` to
+    ``y1`` north of the equator, in units of ``1 / WORLDCOVER_PIXELS_PER_DEG`` degree, snapped
+    outward. Integer pixel indices keep the mosaic exactly on the WorldCover grid, which a float
+    multiple of 1/12000 would not.
+    """
+    west, south, east, north = plan_lonlat_bounds(plan, margin_deg=_WORLDCOVER_MARGIN_DEG)
+    n = WORLDCOVER_PIXELS_PER_DEG
+    return (
+        math.floor(west * n + 1e-6),
+        math.floor(south * n + 1e-6),
+        math.ceil(east * n - 1e-6),
+        math.ceil(north * n - 1e-6),
+    )
+
+
+def _paste_worldcover_tile(ds: rasterio.io.DatasetReader, mosaic: np.ndarray, pixels: tuple[int, int, int, int]) -> int:
+    """Copy the part of one WorldCover tile inside ``pixels`` (:func:`_worldcover_pixels`); returns pixels copied."""
+    x0, y0, x1, y1 = pixels
+    n = WORLDCOVER_PIXELS_PER_DEG
+    t = ds.transform
+    r = 1.0 / n
+    tx0, ty1 = t.c * n, t.f * n
+    if (
+        t.b != 0
+        or t.d != 0
+        or not math.isclose(t.a, r)
+        or not math.isclose(-t.e, r)
+        or abs(tx0 - round(tx0)) > 1e-3
+        or abs(ty1 - round(ty1)) > 1e-3
+    ):
+        raise ReferenceDataError(
+            f"WorldCover tile {ds.name} has transform {tuple(t)[:6]}; expected north-up 1/{n} degree pixels "
+            "on the global WorldCover grid."
+        )
+    left, top = round(tx0), round(ty1)
+    right, bottom = left + ds.width, top - ds.height
+    ix0, ix1 = max(x0, left), min(x1, right)
+    iy0, iy1 = max(y0, bottom), min(y1, top)
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0
+    data = ds.read(1, window=RasterWindow(ix0 - left, top - iy1, ix1 - ix0, iy1 - iy0))
+    dr, dc = y1 - iy1, ix0 - x0
+    mosaic[dr : dr + data.shape[0], dc : dc + data.shape[1]] = data
+    return int(data.size)
+
+
+def _worldcover_mosaic(
+    year: int, version: str, pixels: tuple[int, int, int, int], url_template: str
+) -> tuple[np.ndarray, list[str]]:
+    """Mosaic the WorldCover tiles over ``pixels`` (:func:`_worldcover_pixels`) in EPSG:4326.
+
+    A remote tile that does not exist (HTTP 404, open ocean) reads as no data, as does a local tile
+    that is not there.
+
+    Returns:
+        ``(mosaic, missing_local)``: the uint8 class codes (0 no data) and the local tile paths that
+        were not found.
+    """
+    x0, y0, x1, y1 = pixels
+    n = WORLDCOVER_PIXELS_PER_DEG
+    mosaic = np.zeros((y1 - y0, x1 - x0), dtype=np.uint8)
+    hint = _HINTS["ESA WorldCover"].format()
+    missing_local: list[str] = []
+    for tile in worldcover_tiles((x0 / n, y0 / n, x1 / n, y1 / n)):
+        src = url_template.format(version=version, year=year, tile=tile)
+        if _is_remote(src):
+            if not _exists(src, dataset="ESA WorldCover", hint=hint):
+                logger.info("WorldCover %d tile %s does not exist (open ocean); read as no data.", year, tile)
+                continue
+        elif not Path(_gdal_path(src)).exists():
+            logger.info("WorldCover %d tile %s not found at %s; read as no data.", year, tile, src)
+            missing_local.append(src)
+            continue
+        with rasterio.Env(**gdal_options()), _open_raster(src, dataset="ESA WorldCover", hint=hint) as ds:
+            try:
+                _paste_worldcover_tile(ds, mosaic, pixels)
+            except rasterio.errors.RasterioIOError as exc:
+                if _is_remote(src):
+                    raise _remote_read_error(src, "ESA WorldCover", hint, exc) from exc
+                raise
+    return mosaic, missing_local
+
+
+def _write_worldcover_window(
+    path: Path, mosaic: np.ndarray, year: int, version: str, pixels: tuple[int, int, int, int]
+) -> None:
+    """Write a WorldCover window (:func:`_worldcover_mosaic`) as a GeoTIFF on its own grid, atomically."""
+    x0, y0, x1, y1 = pixels
+    n = WORLDCOVER_PIXELS_PER_DEG
+    with atomic_path(path) as tmp:
+        profile = {
+            "driver": "GTiff",
+            "width": x1 - x0,
+            "height": y1 - y0,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": "EPSG:4326",
+            "transform": from_origin(x0 / n, y1 / n, 1.0 / n, 1.0 / n),
+            "nodata": 0,
+            "compress": "deflate",
+            "tiled": (x1 - x0) >= 256 and (y1 - y0) >= 256,
+        }
+        with rasterio.open(tmp, "w", **profile) as dst:
+            dst.write(mosaic, 1)
+            dst.update_tags(worldcover_version=version, year=str(year), pixels=json.dumps(list(pixels)))
+
+
+@contextlib.contextmanager
+def _worldcover_window(year: int, version: str, pixels: tuple[int, int, int, int], url_template: str) -> Iterator[Path]:
+    """The EPSG:4326 window of one WorldCover map as a GeoTIFF, cached when it is complete.
+
+    The window is cached under ``reference_dir("worldcover")`` once every tile it needs was read or
+    is a remote 404 (open ocean, which is permanent). When a local tile is missing (a template that
+    points at tiles not downloaded yet, or a mosaic with one tile still absent) the window is
+    written to a scratch file that is removed after the read, and nothing is cached: the next call
+    reads the tiles again, so tiles put in place later are used.
+    """
+    key = _cache_key(
+        {
+            "template": url_template,
+            "version": version,
+            "year": year,
+            "pixels": list(pixels),
+            "pixels_per_degree": WORLDCOVER_PIXELS_PER_DEG,
+        }
+    )
+    path = reference_dir("worldcover") / version / f"map_{year}_{key}.tif"
+    if path.exists():
+        yield path
+        return
+    mosaic, missing_local = _worldcover_mosaic(year, version, pixels, url_template)
+    if not missing_local:
+        _write_worldcover_window(path, mosaic, year, version, pixels)
+        yield path
+        return
+    logger.info(
+        "WorldCover %d: %d local tile(s) not found (%s); the window is not cached, so the tiles are read once "
+        "they are in place.",
+        year,
+        len(missing_local),
+        ", ".join(missing_local),
+    )
+    with tempfile.TemporaryDirectory(prefix="tessera_apps_worldcover_") as scratch:
+        uncached = Path(scratch) / path.name
+        _write_worldcover_window(uncached, mosaic, year, version, pixels)
+        yield uncached
+
+
+def worldcover_map(plan: ZonePlan, year: int, *, url_template: str = WORLDCOVER_URL_TEMPLATE) -> np.ndarray:
+    """ESA WorldCover class codes for one year on a zone plan's grid (uint8, the whole window, not masked).
+
+    The tiles the plan touches (3 x 3 degrees, named by their lower-left corner) are read as windows
+    through ``/vsicurl/`` (never downloaded whole), mosaicked in EPSG:4326 on WorldCover's own 1/12000
+    degree grid, cached under ``reference_dir("worldcover")`` per (version, year, snapped bbox,
+    template), then reprojected onto the 10 m grid with GDAL's exact transformer and nearest
+    resampling, so the class codes stay intact. 2020 is read from v100 and 2021 from v200
+    (:data:`WORLDCOVER_VERSIONS`). A missing tile (HTTP 404, open ocean; or a local tile not found)
+    reads as 0, no data. A window with a local tile missing is not cached, so a later call reads the
+    tiles once they are in place; a remote 404 is permanent and is cached.
+
+    WorldCover is itself a model: a 10 m land cover map from Sentinel-1 and Sentinel-2, published
+    for 2020 and 2021 only.
+
+    Args:
+        plan: The zone plan.
+        year: 2020 or 2021.
+        url_template: Tile URL or local path with ``{version}``, ``{year}`` and ``{tile}``.
+
+    Returns:
+        uint8 array of ``plan.shape``: class codes (:data:`WORLDCOVER_CLASSES`), 0 where there is no data.
+
+    Raises:
+        ValueError: ``year`` is not 2020 or 2021.
+        ReferenceDataError: A tile is not on the WorldCover grid.
+        ReferenceUnavailableError: A tile host could not be reached.
+    """
+    version = _check_worldcover_year(year)
+    with _worldcover_window(int(year), version, _worldcover_pixels(plan), url_template) as path:
+        values, _covered = _raster_on_plan(path, plan, band=1, resampling=Resampling.nearest)
+    return values.astype(np.uint8, copy=False)
+
+
+def worldcover_classes(
+    plan: ZonePlan,
+    year: int,
+    classes: Collection[int],
+    *,
+    url_template: str = WORLDCOVER_URL_TEMPLATE,
+) -> np.ndarray:
+    """Plan pixels whose ESA WorldCover class for ``year`` is one of ``classes``, for example ``[95]``.
+
+    See :func:`worldcover_map` for how the tiles are read. 95 is mangroves and 90 herbaceous
+    wetland; the full legend is :data:`WORLDCOVER_CLASSES`.
+
+    Returns:
+        bool array of ``plan.shape``; False outside ``plan.mask`` and where WorldCover has no data.
+
+    Raises:
+        ValueError: ``year`` is not 2020 or 2021, or a class code is not in the legend.
+        ReferenceUnavailableError: A tile host could not be reached.
+    """
+    codes = _check_worldcover_classes(classes)
+    values = worldcover_map(plan, year, url_template=url_template)
+    return np.isin(values, codes) & plan.mask
+
+
+def worldcover_valid(plan: ZonePlan, year: int, *, url_template: str = WORLDCOVER_URL_TEMPLATE) -> np.ndarray:
+    """Plan pixels ESA WorldCover maps for ``year``: any class, that is not 0 (no data or a missing tile).
+
+    Score a WorldCover reference inside this mask.
+
+    Raises:
+        ValueError: ``year`` is not 2020 or 2021.
+        ReferenceUnavailableError: A tile host could not be reached.
+    """
+    return (worldcover_map(plan, year, url_template=url_template) != 0) & plan.mask
 
 
 # --------------------------------------------------------------------------------------------

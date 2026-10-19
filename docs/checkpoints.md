@@ -398,3 +398,95 @@ Notable fixes:
 2. **Section 4.2 cross-check.** Consider calibrating the cut on stable land outside the AOI (the ring), or dropping it. On this front it costs 10 recall points for 1.8 precision points. Worth testing on more AOIs before changing.
 3. **Section 4.2 labels.** Add a fresh-clearing class: loss in year_a - 1 or year_a labelled non-forest in year_b. That needs a design decision on what the classifier sees.
 
+## Checkpoint 5: the wetland app (2026-10-19)
+
+### Built
+
+- **`apps/wetland.py`**, the brief's section 4.3 as corrected by the survey (B6, S15, N9, N10):
+  - **Seeds.** Points or polygons, in any CRS, read through `read_points`. Pixels that are invalid or in the other radar regime are dropped. Seeds are grouped into spatial blocks of 2 km cells, then into folds.
+  - **Score.** Cosine distance to the dequantized seed mean. Ledoit-Wolf shrinkage Mahalanobis is an option, allowed only with 500 or more valid seed pixels.
+  - **Threshold.** The 95th percentile of held-out seed scores (spatial folds), never the in-sample one. The in-sample percentile is reported alongside.
+  - **Extent** for both years, cleaned on the mosaic, plus gain and loss maps.
+  - **Coastal fraction** within 1 km of the shoreline (Natural Earth, labelled approximate) or a `--shoreline` you supply.
+  - **Storm note** for South Florida: Irma 2017 and Ian 2022, saying whether the window spans each.
+  - **Validation** with the seeds and a 200 m buffer excluded from both recall and precision. The report adds the false positives broken down by reference class.
+- **`validate.py`: ESA WorldCover loader** (`worldcover_classes`, `worldcover_valid`, `worldcover_map`). It reads 3 degree tiles from AWS Open Data, versions v100 for 2020 and v200 for 2021, windowed and cached. Global Mangrove Watch is unreachable from the build environment: zenodo.org, eorc.jaxa.jp and unep-wcmc.org all return 403. So WorldCover's mangrove class (95) is the reference here. The GMW loader stays in place for when those hosts can be reached.
+- **Demo data.**
+  - The everglades demo now runs 2020 to 2024. WorldCover exists only for 2020 and 2021; the brief's 2018 needs GMW v3.
+  - 12 bundled seed polygons, made by `scripts/make_everglades_seeds.py`. Each is 100 m square, cut from eroded WorldCover 2020 mangrove stands spread across the AOI: 1,200 pixels in total.
+- **CLI:** `tessera-apps wetland --aoi PATH|demo --year-a --year-b [--seeds] [--validate] [--score cosine|mahalanobis] ...`.
+- **Framework:** `_common.probe_radar_regime` was added. Wildfire and deforest are untouched.
+- **Notebook:** `notebooks/03_wetland.ipynb`, executed, 2.1 MB.
+- **Tests:** 885 offline (up from 750).
+
+### Numbers: the Everglades demo, run from the CLI
+
+The command:
+
+```
+tessera-apps wetland --aoi everglades --year-a 2020 --year-b 2024 --validate
+```
+
+It ran against snapshot `B6AFRJGX5XQC0A716PA0`.
+
+| | |
+|---|---|
+| AOI | 73,237 ha (17N), all radar |
+| Seeds | 1,200 of 1,200 pixels used, in 11 spatial blocks and 5 folds. Score: cosine |
+| Threshold | held-out p95 0.2955, against an in-sample p95 of 0.2794 |
+| Extent | 22,813 ha in 2020 (WorldCover 2020 mangrove: 23,979 ha). 24,979 ha in 2024 |
+| Change, 2020 to 2024 | net +2,166 ha (+9.5%): gain 2,526 ha, loss 360 ha |
+| Coastal fraction (within 1 km, approximate) | 35.8% in 2020, 34.3% in 2024 |
+| Cost | 2.37 GB read, 64 s wall, 1.74 GB peak memory |
+| Rerun with the same arguments | skipped in 3 s |
+
+### Validation: the checkpoint answer
+
+These are scored against ESA WorldCover mangroves, with the seeds and a 200 m buffer around them excluded:
+
+| Year | Reference | Recall | Precision | IoU | F1 |
+|---|---|---|---|---|---|
+| 2020 | WorldCover 2020 v100 | **0.894** | 0.940 | 0.846 | 0.917 |
+| 2021 (from the 2020 to 2021 run) | WorldCover 2021 v200 | **0.934** | 0.934 | 0.876 | 0.934 |
+
+What limits the scores:
+
+- **Edges.** 44% of misses and 55% of false positives lie within 20 m of a mangrove edge. Away from edges, recall is 0.931 and precision 0.969.
+- **False positives are mostly mixed pixels.** Herbaceous wetland and water false positives sit on the mangrove edge. The tree-cover false positives are a real inland confusion: their median distance to any mangrove is 1.5 km.
+- **Some misses are likely storm damage.** About 28% of misses are contiguous blocks of 10 ha or more inside WorldCover stands, and their scores improve steadily from 2020 to 2024. That fits stands still recovering from Irma that a land cover map keeps labelling mangrove. Without a dieback map, this stays an interpretation.
+- **The score is a consistency check, not an independent accuracy.** The seeds and the reference come from the same product, and WorldCover is itself a model. Its v100 and v200 disagree on 3.7% of pixels here.
+
+### Is the change real?
+
+A 2020 to 2021 run measures the method's own noise.
+
+| | 2020 to 2021 | 2020 to 2024 |
+|---|---|---|
+| Loss | 353 ha | 360 ha |
+| Gain in patches under 1 ha (speckle) | 813 ha | 947 ha |
+| Gain in patches of 1 ha or more (coherent) | 308 ha | 1,579 ha |
+
+- **Loss is at the noise floor.** No Ian damage is detected in this AOI.
+- **Speckle gain is flicker.** It is nearly the same after one year as after four.
+- **Coherent gain grows with time.** About half of it lies inside stands WorldCover mapped as mangrove in 2020, which behaves like recovery. Most of the rest is marsh right next to mangrove, which behaves like edge spread. There is also some 2024 drift. Treat the roughly 1,600 ha as an upper bound until it is checked against GMW v4.1.12 (annual) or imagery.
+
+### How it was checked
+
+The review pattern was the same as for the earlier checkpoints. Reviewers confirmed 21 findings, none were refuted, and all were fixed. After the demo, the storm note was corrected: it had said a 2020 to 2021 window "mixes storm damage". The demo and notebook were then re-run, with the same numbers.
+
+The weekly usage limit interrupted the run once, after the reviews. It was resumed from its saved state.
+
+Notable fixes:
+
+- **A points CSV of seeds crashed the app.**
+- **A GeoTIFF `--reference` counted pixels outside its coverage as not-wetland.**
+- **Folds were by feature, not by space.** Seeds 3 and 4 are 400 m apart and now share a block.
+- **A one-off Natural Earth failure became permanent.** A run that missed the coastline was still taken as current on reruns.
+- **The caveat did not say the two WorldCover years are different product versions.**
+
+### Changes to the brief
+
+1. **Section 4.3 and 5, the reference.** Validate with GMW v4.1.12 (annual 1985 to 2025) where Zenodo or JAXA can be reached, with seeds from an independent source. WorldCover works as a fallback, but only for 2020 and 2021.
+2. **Section 4.3, the method.** Default to cosine distance, with a held-out threshold (survey B6). The brief's Mahalanobis on 12 seed points is not defined.
+3. **Section 4.3, the change step.** Report its own noise: run an adjacent-year pair alongside, and split gain and loss into speckle and coherent patches.
+

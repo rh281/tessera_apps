@@ -503,3 +503,244 @@ def deforest(
     _print_deforest(result.report, skipped=result.skipped, out=out, validation_redone=result.validation_redone)
     if do_validate and not result.validation_written and strict_validate:
         raise _fail("Error: --strict-validate is set and the validation reference was not loaded.", EXIT_VALIDATION)
+
+
+def _print_wetland(report: Mapping[str, Any], *, skipped: bool, out: Path, validation_redone: bool = False) -> None:
+    """The run summary: seeds, threshold, extent both years, change, coastal fraction, validation, cost.
+
+    Every value that comes from the user or the outside (paths, error text, warnings) is escaped, so
+    a bracket in it is printed, not read as rich markup.
+    """
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.table import Table
+
+    def e(value: Any) -> str:  # noqa: ANN401
+        return escape(str(value))
+
+    console = Console()
+    s = report.get("summary") or {}
+    if skipped:
+        console.print(f"Outputs in {e(out)} are current for these arguments; pass --force to rerun.")
+    elif validation_redone:
+        console.print(
+            f"Outputs in {e(out)} are current for these arguments; the validation was redone from them without "
+            "reading the store."
+        )
+    year_a, year_b = s.get("year_a"), s.get("year_b")
+    console.print(
+        f"[bold]Wetland {e(year_a)} to {e(year_b)}[/bold], AOI {e(report.get('aoi', {}).get('source'))}: "
+        f"{_fmt(s.get('aoi_area_ha'), ',.0f')} ha in {e(', '.join(s.get('zones') or []))}"
+    )
+    seeds = s.get("seeds") or {}
+    th = s.get("threshold") or {}
+    score = s.get("score") or {}
+    console.print(
+        f"Seeds: {e(seeds.get('source'))}, {_fmt(seeds.get('used'), ',')} of {_fmt(seeds.get('pixels'), ',')} pixels "
+        f"used ({_fmt(seeds.get('dropped_no_data'), ',')} without data, {_fmt(seeds.get('dropped_regime'), ',')} in "
+        f"the other radar regime, {_fmt(seeds.get('dropped_duplicate'), ',')} repeated)"
+    )
+    console.print(
+        f"  {_fmt(seeds.get('polygon_features'), ',')} polygons and {_fmt(seeds.get('point_seeds'), ',')} points in "
+        f"{_fmt(seeds.get('spatial_blocks'), ',')} spatial blocks ({_fmt(seeds.get('fold_cell_m'), 'g')} m cells), "
+        f"{e(th.get('folds'))} spatial folds"
+    )
+    method = "held-out" if th.get("method") == "heldout" else "in-sample (fallback)"
+    console.print(
+        f"Score: {e(score.get('type'))}; threshold {_fmt(th.get('threshold'), '.4g')}, the "
+        f"{_fmt(th.get('percentile'), 'g')}th percentile of the {method} seed scores; the in-sample percentile is "
+        f"{_fmt(th.get('in_sample_percentile'), '.4g')}"
+    )
+    table = Table(title="Extent")
+    for col in ("year", "extent ha", "coastal fraction"):
+        table.add_column(col, justify="right")
+    for year in (year_a, year_b):
+        row = (s.get("extent") or {}).get(str(year)) or {}
+        table.add_row(e(year), _fmt(row.get("extent_ha"), ",.1f"), _fmt(row.get("coastal_fraction"), ".1%"))
+    console.print(table)
+    console.print(
+        f"Change: net {_fmt(s.get('net_change_ha'), ',.1f')} ha ({_fmt(s.get('net_change_pct'), '+.1f')}%), gain "
+        f"{_fmt(s.get('gain_ha'), ',.1f')} ha, loss {_fmt(s.get('loss_ha'), ',.1f')} ha; seeds within the threshold "
+        f"in {e(year_b)}: {_fmt(seeds.get('share_year_b_within_threshold'), '.1%')}"
+    )
+    coast = s.get("coastal") or {}
+    if coast.get("error"):
+        console.print(f"Coastal fraction: not computed ({e(coast['error'])})")
+    else:
+        source = coast.get("file") or coast.get("source")
+        console.print(
+            f"Coastal fraction within {_fmt(coast.get('coast_km'), 'g')} km of the shoreline ({e(source)}"
+            + (", approximate" if coast.get("approximate") else "")
+            + f"): {_fmt(coast.get('fraction_year_a'), '.1%')} in {e(year_a)}, "
+            f"{_fmt(coast.get('fraction_year_b'), '.1%')} in {e(year_b)}"
+        )
+    radar = s.get("radar") or {}
+    console.print(
+        f"Radar: seeds' regime {e(radar.get('seed_regime'))}; regime mismatch "
+        f"{_fmt(radar.get('regime_mismatch_fraction'), '.1%')} of valid pixels, other regime "
+        f"{_fmt(radar.get('other_regime_fraction'), '.1%')} (not classified)"
+    )
+    val = s.get("validation")
+    if isinstance(val, Mapping) and "per_year" in val:
+        for year, row in (val.get("per_year") or {}).items():
+            console.print(
+                f"Validation ({e(val.get('source'))} {e(year)}): recall {_fmt(row.get('recall'))}, precision "
+                f"{_fmt(row.get('precision'))}, IoU {_fmt(row.get('iou'))}, F1 {_fmt(row.get('f1'))} over "
+                f"{_fmt(row.get('pixels_scored'), ',')} pixels, seeds and {_fmt(val.get('seed_buffer_m'), 'g')} m "
+                f"around them left out (recall with them {_fmt(row.get('recall_with_seeds'))})"
+            )
+            fp = row.get("false_positive_classes") or {}
+            if fp:
+                top = sorted(fp.items(), key=lambda kv: -float(kv[1].get("share") or 0.0))[:4]
+                console.print(
+                    "  false positives by WorldCover class: "
+                    + ", ".join(f"{e(v.get('name'))} {_fmt(v.get('share'), '.0%')}" for _, v in top)
+                )
+        mix = val.get("version_mix")
+        if isinstance(mix, Mapping):
+            versions = mix.get("versions") or {}
+            console.print(
+                "  the years are scored against different WorldCover versions ("
+                + ", ".join(f"{e(y)} {e(v)}" for y, v in versions.items())
+                + f"), whose maps agree on the reference classes over {_fmt(mix.get('reference_agreement'), '.1%')} "
+                "of the pixels scored in both years: compare the years with that in mind"
+            )
+        if val.get("years_not_covered"):
+            console.print(f"  not scored (no reference map): {e(', '.join(str(y) for y in val['years_not_covered']))}")
+    elif isinstance(val, Mapping) and "error" in val:
+        console.print(f"Validation: not done ({e(val['error'])})")
+    if s.get("storm_note"):
+        console.print(f"Note: {e(s['storm_note'])}")
+    wall = (report.get("timings") or {}).get("wall_s")
+    cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
+    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    for warning in report.get("warnings") or []:
+        console.print(f"[yellow]Warning:[/yellow] {e(warning)}", markup=True)
+
+
+def _reference_classes(text: str) -> list[int]:
+    try:
+        codes = [int(part) for part in text.replace(" ", "").split(",") if part]
+    except ValueError as exc:
+        raise _fail(
+            f"Error: --reference-classes {text!r} must be comma-separated WorldCover class codes, like 95 or 95,90.",
+            EXIT_USAGE,
+        ) from exc
+    if not codes:
+        raise _fail("Error: --reference-classes needs at least one WorldCover class code, like 95.", EXIT_USAGE)
+    return codes
+
+
+@app.command()
+def wetland(
+    aoi: Annotated[
+        str, typer.Option("--aoi", help="AOI file (GeoJSON, GeoPackage, shapefile; any CRS) or a demo name.")
+    ],
+    year_a: Annotated[int, typer.Option("--year-a", help="First year; the seeds set the reference in it.")],
+    year_b: Annotated[int, typer.Option("--year-b", help="Second year, after --year-a.")],
+    seeds: Annotated[
+        str | None,
+        typer.Option(
+            "--seeds",
+            help="Seeds file (points or polygons of the wetland type, any CRS), or 'demo' for the AOI demo's bundled "
+            "seeds (the default for --aoi everglades).",
+        ),
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = DEFAULT_OUT,
+    validate: Annotated[
+        bool,
+        typer.Option("--validate", help="Score each year's extent against WorldCover, GMW or --reference."),
+    ] = False,
+    reference: Annotated[
+        Path | None,
+        typer.Option(
+            "--reference",
+            help="Vector file or GeoTIFF of the wetland type to validate against (implies --validate).",
+        ),
+    ] = None,
+    reference_source: Annotated[
+        str, typer.Option("--reference-source", help="worldcover (2020, 2021) or gmw.")
+    ] = "worldcover",
+    reference_classes: Annotated[
+        str,
+        typer.Option(
+            "--reference-classes", help="WorldCover classes of the wetland type: 95 mangroves, 90 herbaceous."
+        ),
+    ] = "95",
+    gmw_version: Annotated[str, typer.Option("--gmw-version", help="GMW version: v3 or v4.1.12.")] = "v3",
+    score: Annotated[str, typer.Option("--score", help="cosine, or mahalanobis (500 or more seed pixels).")] = "cosine",
+    threshold_pct: Annotated[
+        float, typer.Option("--threshold-pct", help="Percentile of the held-out seed scores that sets the threshold.")
+    ] = 95.0,
+    folds: Annotated[int, typer.Option("--folds", help="Spatial folds of the seeds for the held-out scores.")] = 5,
+    fold_cell_m: Annotated[
+        float,
+        typer.Option(
+            "--fold-cell-m",
+            help="Grid cell (metres) that blocks the seeds into spatial folds: seeds in one cell, or touching, share "
+            "a fold. Smaller for a small AOI.",
+        ),
+    ] = 2000.0,
+    min_area_ha: Annotated[float, typer.Option("--min-area-ha", help="Drop extent patches smaller than this.")] = 0.1,
+    seed_buffer_m: Annotated[
+        float, typer.Option("--seed-buffer-m", help="Leave pixels this close to a seed out of the validation.")
+    ] = 200.0,
+    shoreline: Annotated[
+        Path | None,
+        typer.Option("--shoreline", help="Shoreline lines or polygons (any CRS); Natural Earth 10m when omitted."),
+    ] = None,
+    coast_km: Annotated[float, typer.Option("--coast-km", help="Coastal buffer for the coastal fraction.")] = 1.0,
+    seed: Annotated[int, typer.Option("--seed", help="Seed of the spatial fold assignment.")] = 0,
+    force: Annotated[bool, typer.Option("--force", help="Rerun even when the outputs are current.")] = False,
+    snapshot: Annotated[str | None, typer.Option("--snapshot", help="Pin an Icechunk snapshot id.")] = None,
+    i_know_this_is_large: Annotated[
+        bool, typer.Option("--i-know-this-is-large", help="Lift the 10,000 km2 AOI limit and the seed chunk limit.")
+    ] = False,
+    strict_validate: Annotated[
+        bool,
+        typer.Option(
+            "--strict-validate",
+            help="Stop with exit code 3, before reading any chunk, when --validate cannot load its reference.",
+        ),
+    ] = False,
+) -> None:
+    """Map a wetland type from seeds in two years, and how its extent moved in between."""
+    from tessera_apps import io
+    from tessera_apps.apps import AppInputError, StrictValidationError, run_wetland
+
+    do_validate = validate or reference is not None
+    classes = _reference_classes(reference_classes)
+    with _rich_logging():
+        try:
+            result = run_wetland(
+                aoi,
+                year_a,
+                year_b,
+                out,
+                seeds=seeds,
+                score=score,
+                threshold_pct=threshold_pct,
+                folds=folds,
+                fold_cell_m=fold_cell_m,
+                min_area_ha=min_area_ha,
+                shoreline=shoreline,
+                coast_km=coast_km,
+                validate=do_validate,
+                reference=reference,
+                reference_source=reference_source,
+                reference_classes=classes,
+                gmw_version=gmw_version,
+                seed_buffer_m=seed_buffer_m,
+                seed=seed,
+                force=force,
+                max_area_km2=None if i_know_this_is_large else io.MAX_AOI_KM2,
+                snapshot_id=snapshot,
+                strict_validate=strict_validate and do_validate,
+            )
+        except StrictValidationError as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_VALIDATION) from exc
+        except (AppInputError, io.TesseraError) as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_USAGE) from exc
+    _print_wetland(result.report, skipped=result.skipped, out=out, validation_redone=result.validation_redone)
+    if do_validate and not result.validation_written and strict_validate:
+        raise _fail("Error: --strict-validate is set and the validation reference was not loaded.", EXIT_VALIDATION)

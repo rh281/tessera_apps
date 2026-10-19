@@ -1,14 +1,19 @@
-"""The bundled demo AOIs, loaded from ``tessera_apps/data`` with :mod:`importlib.resources`.
+"""The bundled demo AOIs and seed sets, loaded from ``tessera_apps/data`` with :mod:`importlib.resources`.
 
 Each demo is a GeoJSON FeatureCollection in EPSG:4326. The feature whose ``role`` property is
 ``"aoi"`` is the AOI (feature 0 in every bundled file); ``caldor.geojson`` also carries the Hansen
 2021 loss outline as a second feature with role ``"hansen_2021_loss_outline"``.
+
+The wetland app's default seeds are bundled next to their demo AOI (:data:`DEMO_SEEDS`):
+``everglades_seeds.geojson`` holds 12 square mangrove stand polygons of about 100 m, every feature
+with role ``"seed"`` (``scripts/make_everglades_seeds.py`` derives them from ESA WorldCover 2020).
 """
 
 from __future__ import annotations
 
 import json
 from importlib.resources import files
+from pathlib import Path
 from typing import Any
 
 from shapely.geometry import shape
@@ -16,6 +21,10 @@ from shapely.geometry.base import BaseGeometry
 
 #: Names of the bundled demos, one per app with a demo AOI.
 DEMO_NAMES = ("caldor", "rondonia", "everglades")
+#: Bundled seed sets, by the demo AOI they belong to (the wetland app's default ``--seeds``).
+DEMO_SEEDS = {"everglades": "everglades_seeds"}
+#: Names of the bundled seed sets.
+SEED_NAMES = tuple(DEMO_SEEDS.values())
 
 
 def _check_name(name: str) -> str:
@@ -73,3 +82,49 @@ def demo_aoi(name: str) -> BaseGeometry:
         if (feature.get("properties") or {}).get("role") == "aoi":
             return shape(feature["geometry"])
     return shape(collection["features"][0]["geometry"])
+
+
+def _data_name(name: str) -> str:
+    key = name.strip().lower()
+    if key not in DEMO_NAMES and key not in SEED_NAMES:
+        known = ", ".join((*DEMO_NAMES, *SEED_NAMES))
+        raise ValueError(f"Unknown bundled data {name!r}; the bundled files are {known}.")
+    return key
+
+
+def demo_path(name: str) -> Path:
+    """Path of a bundled GeoJSON: a demo AOI (``"everglades"``) or a seed set (``"everglades_seeds"``).
+
+    Raises:
+        ValueError: ``name`` is neither a demo nor a seed set.
+    """
+    return Path(str(files("tessera_apps.data").joinpath(f"{_data_name(name)}.geojson")))
+
+
+def seeds_name(name: str) -> str:
+    """The seed set bundled for a demo AOI, or the seed set itself: ``seeds_name("everglades")``.
+
+    Raises:
+        ValueError: ``name`` is not a seed set or a demo that has one.
+    """
+    key = name.strip().lower()
+    if key in SEED_NAMES:
+        return key
+    if key in DEMO_SEEDS:
+        return DEMO_SEEDS[key]
+    have = ", ".join(f"{k} ({v})" for k, v in DEMO_SEEDS.items())
+    raise ValueError(f"No bundled seeds for {name!r}; seeds are bundled for {have}.")
+
+
+def demo_seeds(name: str) -> dict[str, Any]:
+    """The parsed seed FeatureCollection bundled for a demo AOI or named directly.
+
+    Every feature has role ``"seed"``. For example ``demo_seeds("everglades")`` gives the 12
+    mangrove stand squares of the Everglades demo.
+
+    Raises:
+        ValueError: ``name`` is not a seed set or a demo that has one.
+    """
+    key = seeds_name(name)
+    text = files("tessera_apps.data").joinpath(f"{key}.geojson").read_text(encoding="utf-8")
+    return json.loads(text)

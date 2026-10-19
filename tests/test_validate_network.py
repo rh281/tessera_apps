@@ -124,3 +124,27 @@ def test_every_network_test_uses_the_fresh_cache(request):
     assert v.cache_dir() != Path.home() / ".cache" / "tessera_apps"
     # Downloads and cache entries go through export.atomic_path, whose scratch names end in ".tmp".
     assert not [p for p in v.cache_dir().rglob("*") if p.name.endswith(".tmp") or ".part" in p.name]
+
+
+def test_worldcover_everglades_window(reader):
+    """WorldCover over a 1 km window of mangrove coast in the Everglades AOI: 2020 from v100, 2021 from v200.
+
+    The window (around bundled seed 8) was about 56 percent mangrove in both years when checked.
+    """
+    window = box(-81.3545, 25.8341, -81.3445, 25.8431)
+    (plan,) = plan_aoi(reader, window).zones
+    assert plan.zone == "17N" and v.worldcover_tiles(v.plan_lonlat_bounds(plan)) == ["N24W084"]
+    mangrove = {year: v.worldcover_classes(plan, year, [v.WORLDCOVER_MANGROVE]) for year in (2020, 2021)}
+    valid = v.worldcover_valid(plan, 2020)
+    n = plan.n_pixels
+    assert valid.sum() / n > 0.99
+    for year, m in mangrove.items():
+        assert 0.4 < m.sum() / n < 0.7, (year, m.sum() / n)
+        assert not (m & ~plan.mask).any()
+    # The two years are separate products, so they differ a little but agree mostly.
+    agree = (mangrove[2020] == mangrove[2021])[plan.mask].mean()
+    assert 0.9 < agree < 1.0, agree
+    codes = v.worldcover_map(plan, 2020)
+    assert set(np.unique(codes[plan.mask]).tolist()) <= set(v.WORLDCOVER_CLASSES)
+    cached = sorted(p.parent.name for p in v.reference_dir("worldcover").rglob("*.tif"))
+    assert cached == ["v100", "v200"]

@@ -1963,6 +1963,294 @@ def test_year_of(value, year):
 
 
 # --------------------------------------------------------------------------------------------
+# ESA WorldCover
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("lon", "lat", "tile"),
+    [
+        (-81.5, 25.9, "N24W084"),  # the Everglades demo AOI
+        (-84.0, 25.0, "N24W084"),  # on a tile's west edge: that tile
+        (-81.0, 25.0, "N24W081"),  # on its east edge: the tile to the east
+        (-81.5, 27.0, "N24W084"),  # on a latitude edge: the tile whose top edge it is
+        (-81.5, 27.001, "N27W084"),
+        (-81.5, 24.0, "N21W084"),
+        (0.0, 0.0, "S03E000"),
+        (-0.01, -0.01, "S03W003"),
+        (-59.0, -2.0, "S03W060"),
+        (151.2, -33.9, "S36E150"),
+        (2.9, 5.5, "N03E000"),
+        (3.0, 5.5, "N03E003"),
+        (180.0, 60.0, "N57E177"),
+        (-180.0, -55.0, "S57W180"),
+        (10.0, 90.0, "N87E009"),
+        (10.0, -90.0, "S90E009"),
+    ],
+)
+def test_worldcover_tile_names(lon, lat, tile):
+    assert v.worldcover_tile(lon, lat) == tile
+
+
+def test_worldcover_tile_rejects_bad_points():
+    for lon, lat in ((200.0, 0.0), (0.0, float("nan")), (0.0, 91.0)):
+        with pytest.raises(ValueError, match="lon/lat"):
+            v.worldcover_tile(lon, lat)
+
+
+@pytest.mark.parametrize(
+    ("bbox", "tiles"),
+    [
+        ((-81.62, 25.75, -81.32, 25.97), ["N24W084"]),
+        ((-84.0, 24.0, -81.0, 27.0), ["N24W084"]),  # exactly one tile: edges pull in nothing
+        ((-84.0, 24.0, -80.99, 27.01), ["N27W084", "N27W081", "N24W084", "N24W081"]),
+        ((-0.5, -0.5, 0.5, 0.5), ["N00W003", "N00E000", "S03W003", "S03E000"]),
+        ((-120.05, 38.8, -119.95, 38.9), ["N36W123", "N36W120"]),
+        ((-81.0, 27.0, -81.0, 27.0), ["N24W081"]),  # zero area: the point rule
+        ((-82.0, 25.0, -81.0, 25.0), ["N24W084"]),
+        ((178.0, 10.0, 180.0, 11.0), ["N09E177"]),
+        ((-180.0, -60.0, -177.0, -57.0), ["S60W180"]),
+    ],
+)
+def test_worldcover_tiles_for_bbox(bbox, tiles):
+    assert v.worldcover_tiles(bbox) == tiles
+
+
+def test_worldcover_tiles_rejects_bad_bbox():
+    with pytest.raises(ValueError, match="lon/lat"):
+        v.worldcover_tiles((1.0, 0.0, 0.0, 1.0))
+    with pytest.raises(ValueError, match="west, south"):
+        v.worldcover_tiles((0.0, 0.0, 1.0))
+    with pytest.raises(ValueError, match="finite"):
+        v.worldcover_tiles((0.0, 0.0, float("inf"), 1.0))
+
+
+WC_RES = 1.0 / v.WORLDCOVER_PIXELS_PER_DEG
+WC_NORTH, WC_H, WC_W = 38.9, 1200, 600
+WC_WEST = {"N36W123": -120.05, "N36W120": -120.0}
+WC_CODES = np.array([10, 20, 30, 80, 90, 95, 95, 40], dtype=np.uint8)
+
+
+def wc_pattern(year: int, tile: str) -> np.ndarray:
+    """Class codes laid in 3 x 4 pixel blocks, shifted by year and tile, with no-data (0) stripes."""
+    rows, cols = np.mgrid[0:WC_H, 0:WC_W]
+    shift = (3 if year == 2021 else 0) + (5 if tile == "N36W120" else 0)
+    codes = WC_CODES[(rows // 3 + cols // 4 + shift) % WC_CODES.size]
+    return np.where((rows // 50) % 7 == 3, np.uint8(0), codes).astype(np.uint8)
+
+
+def wc_name(year: int, tile: str) -> str:
+    return f"ESA_WorldCover_10m_{year}_{v.WORLDCOVER_VERSIONS[year]}_{tile}_Map.tif"
+
+
+@pytest.fixture
+def worldcover_dir(tmp_path) -> tuple[Path, str]:
+    """Pieces of WorldCover tiles N36W123 and N36W120 around the 120 W edge, for 2020 (v100) and 2021 (v200)."""
+    root = tmp_path / "worldcover_tiles"
+    root.mkdir()
+    for year in (2020, 2021):
+        for tile, west in WC_WEST.items():
+            write_lonlat_tif(root / wc_name(year, tile), wc_pattern(year, tile), west, WC_NORTH, WC_RES, nodata=0)
+    return root, str(root / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+
+
+def wc_expected(plan: ZonePlan, year: int) -> np.ndarray:
+    lon, lat = centres_lonlat(plan)
+    out = np.zeros(plan.shape, dtype=np.uint8)
+    for tile, west in WC_WEST.items():
+        vals, inside = lookup(wc_pattern(year, tile), west, WC_NORTH, WC_RES, lon, lat)
+        out[inside] = vals[inside]
+    return out
+
+
+def test_worldcover_map_mosaics_tiles_onto_each_zone(worldcover_dir, two_zone):
+    _, template = worldcover_dir
+    for plan in two_zone:
+        for year in (2020, 2021):
+            got = v.worldcover_map(plan, year, url_template=template)
+            expected = wc_expected(plan, year)
+            assert got.dtype == np.uint8 and got.shape == plan.shape
+            assert (got != expected).sum() == 0
+            assert set(np.unique(expected[plan.mask]).tolist()) >= {0, 10, 80, 90, 95}
+
+
+def test_worldcover_classes_and_valid(worldcover_dir, two_zone):
+    _, template = worldcover_dir
+    for plan in two_zone:
+        codes = wc_expected(plan, 2020)
+        mangrove = v.worldcover_classes(plan, 2020, [95], url_template=template)
+        assert mangrove.dtype == np.bool_ and (mangrove != ((codes == 95) & plan.mask)).sum() == 0
+        wet = v.worldcover_classes(plan, 2020, (90, 95), url_template=template)
+        assert (wet != (np.isin(codes, [90, 95]) & plan.mask)).sum() == 0 and wet.sum() > mangrove.sum()
+        valid = v.worldcover_valid(plan, 2020, url_template=template)
+        assert (valid != ((codes != 0) & plan.mask)).sum() == 0
+        assert valid.any() and (~valid & plan.mask).any()
+        assert not (mangrove & ~plan.mask).any() and not (valid & ~plan.mask).any()
+
+
+def test_worldcover_years_read_their_own_version(worldcover_dir, two_zone, tmp_path):
+    """2020 comes from v100 and 2021 from v200, never one map for both years."""
+    root, template = worldcover_dir
+    plan = two_zone[0]
+    m20 = v.worldcover_map(plan, 2020, url_template=template)
+    m21 = v.worldcover_map(plan, 2021, url_template=template)
+    assert (m20 != m21)[plan.mask].mean() > 0.5
+    assert (m20 != wc_expected(plan, 2020)).sum() == 0 and (m21 != wc_expected(plan, 2021)).sum() == 0
+    # Without the v200 tiles, 2021 has no data at all: it is never filled from the 2020 map.
+    only = tmp_path / "only_2020"
+    only.mkdir()
+    for p in root.glob("*_2020_v100_*"):
+        (only / p.name).write_bytes(p.read_bytes())
+    only_2020 = str(only / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+    assert not v.worldcover_map(plan, 2021, url_template=only_2020).any()
+    assert not v.worldcover_valid(plan, 2021, url_template=only_2020).any()
+    np.testing.assert_array_equal(v.worldcover_map(plan, 2020, url_template=only_2020), m20)
+
+
+def test_worldcover_refuses_other_years_and_classes(worldcover_dir, two_zone):
+    _, template = worldcover_dir
+    plan = two_zone[0]
+    for year in (2018, 2019, 2022, 2024):
+        with pytest.raises(ValueError, match=r"2020 \(v100\) and 2021 \(v200\) only"):
+            v.worldcover_map(plan, year, url_template=template)
+        with pytest.raises(ValueError, match="2020"):
+            v.worldcover_classes(plan, year, [95], url_template=template)
+        with pytest.raises(ValueError, match="2021"):
+            v.worldcover_valid(plan, year, url_template=template)
+    with pytest.raises(ValueError, match="no class"):
+        v.worldcover_classes(plan, 2020, [95, 96], url_template=template)
+    with pytest.raises(ValueError, match="at least one"):
+        v.worldcover_classes(plan, 2020, [], url_template=template)
+    assert not list(v.reference_dir("worldcover").rglob("*.tif"))
+
+
+def test_worldcover_missing_tile_reads_as_no_data(worldcover_dir, two_zone):
+    root, template = worldcover_dir
+    for p in root.glob("*N36W120*"):
+        p.unlink()
+    west, east = two_zone
+    assert not v.worldcover_map(east, 2020, url_template=template)[east.mask].any()
+    assert not v.worldcover_valid(east, 2020, url_template=template).any()
+    assert not v.worldcover_classes(east, 2020, [95], url_template=template).any()
+    assert v.worldcover_valid(west, 2020, url_template=template).any()
+
+
+def test_worldcover_cache_is_reused_and_written_atomically(worldcover_dir, two_zone):
+    root, template = worldcover_dir
+    plan = two_zone[0]
+    first = v.worldcover_map(plan, 2020, url_template=template)
+    cached = list(v.reference_dir("worldcover").rglob("*.tif"))
+    assert len(cached) == 1 and cached[0].parent.name == "v100" and cached[0].name.startswith("map_2020_")
+    with rasterio.open(cached[0]) as ds:
+        assert ds.crs.to_epsg() == 4326 and ds.nodata == 0
+        assert ds.res == pytest.approx((WC_RES, WC_RES))
+        assert ds.transform.c * v.WORLDCOVER_PIXELS_PER_DEG == pytest.approx(round(ds.transform.c / WC_RES))
+        assert ds.transform.f * v.WORLDCOVER_PIXELS_PER_DEG == pytest.approx(round(ds.transform.f / WC_RES))
+    for p in root.iterdir():
+        p.unlink()
+    np.testing.assert_array_equal(v.worldcover_map(plan, 2020, url_template=template), first)
+    assert no_temp_files(v.cache_dir())
+    # Another year or another plan is another window, read from the (now missing) local tiles: no
+    # data, and not cached, so the tiles are read once they are back.
+    assert not v.worldcover_map(plan, 2021, url_template=template).any()
+    assert not v.worldcover_map(two_zone[1], 2020, url_template=template).any()
+    names = sorted(p.parent.name for p in v.reference_dir("worldcover").rglob("*.tif"))
+    assert names == ["v100"] and no_temp_files(v.cache_dir())
+
+
+def test_worldcover_local_tiles_put_in_place_later_are_read(worldcover_dir, two_zone, tmp_path):
+    """A window built while a local tile was missing is never cached (finding F2), wholly or partly."""
+    root, _ = worldcover_dir
+    plan = two_zone[0]
+    assert v.worldcover_tiles(v.plan_lonlat_bounds(plan, margin_deg=0.001)) == ["N36W123", "N36W120"]
+    later = tmp_path / "downloaded_later"
+    later.mkdir()
+    template = str(later / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+    # No tile yet: no data, nothing cached.
+    assert not v.worldcover_map(plan, 2020, url_template=template).any()
+    assert not list(v.reference_dir("worldcover").rglob("*.tif"))
+    # One of the two tiles: only its part of the window, still not cached.
+    west = wc_name(2020, "N36W123")
+    (later / west).write_bytes((root / west).read_bytes())
+    partial = v.worldcover_map(plan, 2020, url_template=template)
+    lon, _ = centres_lonlat(plan)
+    full = wc_expected(plan, 2020)
+    assert partial.any() and not partial[lon >= -120.0].any()
+    np.testing.assert_array_equal(partial[lon < -120.0], full[lon < -120.0])
+    assert not list(v.reference_dir("worldcover").rglob("*.tif"))
+    # Both tiles: the whole window, now cached and reused.
+    east = wc_name(2020, "N36W120")
+    (later / east).write_bytes((root / east).read_bytes())
+    np.testing.assert_array_equal(v.worldcover_map(plan, 2020, url_template=template), full)
+    assert len(list(v.reference_dir("worldcover").rglob("*.tif"))) == 1
+    for p in later.iterdir():
+        p.unlink()
+    np.testing.assert_array_equal(v.worldcover_map(plan, 2020, url_template=template), full)
+    assert no_temp_files(v.cache_dir())
+
+
+def test_worldcover_cache_is_per_url_template(worldcover_dir, two_zone, tmp_path):
+    _, template = worldcover_dir
+    plan = two_zone[0]
+    wrong = str(tmp_path / "nowhere" / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+    assert not v.worldcover_map(plan, 2020, url_template=wrong).any()
+    got = v.worldcover_map(plan, 2020, url_template=template)
+    assert got.any() and (got != wc_expected(plan, 2020)).sum() == 0
+
+
+def test_worldcover_rejects_a_tile_off_its_grid(tmp_path, two_zone):
+    root = tmp_path / "off_grid"
+    root.mkdir()
+    for tile, west in WC_WEST.items():
+        write_lonlat_tif(root / wc_name(2020, tile), wc_pattern(2020, tile), west + WC_RES / 3, WC_NORTH, WC_RES)
+    template = str(root / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+    with pytest.raises(v.ReferenceDataError, match="WorldCover grid"):
+        v.worldcover_map(two_zone[0], 2020, url_template=template)
+    coarse = tmp_path / "coarse"
+    coarse.mkdir()
+    write_lonlat_tif(coarse / wc_name(2020, "N36W123"), np.full((10, 10), 95, np.uint8), -120.05, WC_NORTH, 0.001)
+    with pytest.raises(v.ReferenceDataError, match="1/12000"):
+        v.worldcover_map(
+            two_zone[0], 2020, url_template=str(coarse / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+        )
+
+
+def test_worldcover_http_404_reads_no_data_and_unreachable_names_host(web, two_zone):
+    template = "https://wc.example.test/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
+    plan = two_zone[0]
+    assert not v.worldcover_map(plan, 2021, url_template=template).any()
+    heads = web.urls("HEAD")
+    assert heads == [
+        "https://wc.example.test/v200/2021/map/ESA_WorldCover_10m_2021_v200_N36W123_Map.tif",
+        "https://wc.example.test/v200/2021/map/ESA_WorldCover_10m_2021_v200_N36W120_Map.tif",
+    ]
+
+    def refuse(method, params):
+        return proxy_refusal()
+
+    web.route(heads[0].replace("2021", "2020").replace("v200", "v100"), refuse)
+    with pytest.raises(v.ReferenceUnavailableError) as info:
+        v.worldcover_classes(plan, 2020, [95], url_template=template)
+    msg = str(info.value)
+    assert "wc.example.test" in msg and "ESA WorldCover" in msg and "403 Forbidden" in msg
+    assert "url_template" in msg and "--reference" in msg
+
+
+def test_worldcover_remote_tile_read_through_vsicurl(range_server, plan10, monkeypatch):
+    monkeypatch.setattr(v, "_exists", lambda url, **kwargs: True)
+    data = wc_pattern(2020, "N36W123")
+    name = wc_name(2020, "N36W123")
+    url = range_server.add(name, geotiff_bytes(data, WC_WEST["N36W123"], WC_NORTH, WC_RES))
+    assert url.endswith(name)
+    template = url[: -len(name)] + "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"
+    assert v.worldcover_tiles(v.plan_lonlat_bounds(plan10, margin_deg=0.001)) == ["N36W123"]
+    got = v.worldcover_map(plan10, 2020, url_template=template)
+    lon, lat = centres_lonlat(plan10)
+    vals, inside = lookup(data, WC_WEST["N36W123"], WC_NORTH, WC_RES, lon, lat)
+    assert inside.all() and (got == vals).all()
+
+
+# --------------------------------------------------------------------------------------------
 # Global Mangrove Watch
 # --------------------------------------------------------------------------------------------
 

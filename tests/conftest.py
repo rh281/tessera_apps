@@ -275,3 +275,67 @@ def fixture_window_lonlat(fx: dict[str, np.ndarray], rows: tuple[int, int], cols
     square = box(c + cols[0] * a, f - rows[1] * a, c + cols[1] * a, f - rows[0] * a)
     to_ll = Transformer.from_crs(int(fx["epsg"]), 4326, always_xy=True)
     return shapely.transform(shapely.segmentize(square, 10.0), to_ll.transform, interleaved=False)
+
+
+# --------------------------------------------------------------------------------------------
+# ESA WorldCover tile pieces over a zone grid (wetland tests)
+# --------------------------------------------------------------------------------------------
+
+
+def write_worldcover_tiles(
+    directory: Path,
+    epsg: int,
+    left: float,
+    top: float,
+    codes_by_year: dict[int, np.ndarray],
+    *,
+    pixel: float = 10.0,
+    margin: int = 20,
+) -> str:
+    """WorldCover tile pieces whose pixels take the code of the zone grid pixel under their centre.
+
+    ``codes_by_year[year]`` is a uint8 (H, W) array on a zone grid with corner ``(left, top)`` in
+    ``epsg``; each piece lies on the global 1/12000 degree WorldCover grid, covers that window plus
+    ``margin`` WorldCover pixels (0, no data, outside it) and is named like the real tile of its
+    centre, for the year's version. Returns the ``url_template`` for the loaders.
+    """
+    import math
+
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from tessera_apps import validate
+
+    directory.mkdir(parents=True, exist_ok=True)
+    n = validate.WORLDCOVER_PIXELS_PER_DEG
+    to_ll = Transformer.from_crs(epsg, 4326, always_xy=True)
+    to_zone = Transformer.from_crs(4326, epsg, always_xy=True)
+    for year, codes in codes_by_year.items():
+        h, w = codes.shape
+        xs = [left, left + w * pixel]
+        ys = [top - h * pixel, top]
+        lons, lats = to_ll.transform([xs[0], xs[0], xs[1], xs[1]], [ys[0], ys[1], ys[0], ys[1]])
+        x0, x1 = math.floor(min(lons) * n) - margin, math.ceil(max(lons) * n) + margin
+        y0, y1 = math.floor(min(lats) * n) - margin, math.ceil(max(lats) * n) + margin
+        cols, rows = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y1, y0, -1) - 0.5)
+        zx, zy = to_zone.transform(cols / n, rows / n)
+        zr = np.floor((top - np.asarray(zy)) / pixel).astype(np.int64)
+        zc = np.floor((np.asarray(zx) - left) / pixel).astype(np.int64)
+        inside = (zr >= 0) & (zr < h) & (zc >= 0) & (zc < w)
+        data = np.zeros(zr.shape, dtype=np.uint8)
+        data[inside] = codes[zr[inside], zc[inside]]
+        tile = validate.worldcover_tile((min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2)
+        profile = {
+            "driver": "GTiff",
+            "width": data.shape[1],
+            "height": data.shape[0],
+            "count": 1,
+            "dtype": "uint8",
+            "crs": "EPSG:4326",
+            "transform": from_origin(x0 / n, y1 / n, 1.0 / n, 1.0 / n),
+            "nodata": 0,
+        }
+        name = f"ESA_WorldCover_10m_{year}_{validate.WORLDCOVER_VERSIONS[year]}_{tile}_Map.tif"
+        with rasterio.open(directory / name, "w", **profile) as ds:
+            ds.write(data, 1)
+    return str(directory / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")

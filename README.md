@@ -2,13 +2,13 @@
 
 Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global embeddings published by dClimate: 128-dimension, 10 m, annual (2017 to 2025) embeddings in an anonymous Icechunk store at `s3://tessera-embeddings/v1.1/dclimate.icechunk` (AWS `us-west-2`). No GPU, no model training beyond scikit-learn linear models.
 
-**Status: checkpoint 4 of the build brief.** `wildfire` and `deforest` are built; `wetland` and `restore` are planned. See `docs/checkpoints.md` for the checkpoint report and numbers.
+**Status: checkpoint 5 of the build brief.** `wildfire`, `deforest` and `wetland` are built; `restore` is planned. See `docs/checkpoints.md` for the checkpoint report and numbers.
 
 | App | Question | Status |
 |---|---|---|
 | `wildfire` | Where did it burn, and how far has each burned pixel recovered? | built, [notebook 01](notebooks/01_wildfire.ipynb) |
 | `deforest` | Where did forest become something else between two years? | built, [notebook 02](notebooks/02_deforest.ipynb) |
-| `wetland` | Given a few known wetland locations, where else is that wetland, and how has it moved? | planned |
+| `wetland` | Given a few known wetland locations, where else is that wetland, and how has it moved? | built, [notebook 03](notebooks/03_wetland.ipynb) |
 | `restore` | Is a restoration site diverging from a matched control the way a working project should? | planned |
 
 ## Install
@@ -40,6 +40,16 @@ tessera-apps deforest --aoi rondonia --year-a 2019 --year-b 2022 --validate
 ```
 
 This writes `out/deforest_2019_2022.tif` (forest probability in both years, distance, converted), `deforest_summary.parquet` and `.csv`, `deforest_labels.parquet`, `deforest_preview.png`, `deforest_report.json` and `deforest_validation.json`. The Rondonia demo reads 1.6 GB in under 2 minutes. See [notebook 02](notebooks/02_deforest.ipynb), which also shows how to run with hand labels.
+
+## Wetland
+
+Given a few confirmed locations of a wetland type (points or polygons), finds where else it is and how its extent moved between two years. It scores every pixel by cosine distance to the seeds' mean embedding, sets the threshold from seed scores held out by location (so it is not fitted to the seeds themselves), and reports extent, gain, loss and the share near the coast. With `--validate` it scores the extent against ESA WorldCover (2020 and 2021) or Global Mangrove Watch, leaving the seeds out of the score.
+
+```bash
+tessera-apps wetland --aoi everglades --year-a 2020 --year-b 2024 --validate
+```
+
+This writes `out/wetland_2020_2024.tif` (score and extent for both years, change), `wetland_summary.parquet` and `.csv`, `wetland_seeds.parquet`, `wetland_preview.png`, `wetland_report.json` and `wetland_validation.json`. The Everglades demo reads 2.4 GB in about a minute. See [notebook 03](notebooks/03_wetland.ipynb).
 
 ## Reading the store
 
@@ -77,7 +87,7 @@ What `io.py` takes care of:
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q          # 750 offline tests, in-memory stores and a real 64 x 64 fixture
+.venv/bin/python -m pytest -q          # 885 offline tests, in-memory stores and a real 64 x 64 fixture
 .venv/bin/python -m pytest -m network  # live store and reference datasets (NIFC, EFFIS, Zenodo, USFS must be reachable)
 .venv/bin/ruff check src tests scripts && .venv/bin/mypy src tests scripts
 ```
