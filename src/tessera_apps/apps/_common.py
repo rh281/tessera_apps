@@ -1035,6 +1035,65 @@ class BandMosaic:
         self.data[i][self.take] = flat[self.source]
 
 
+#: Layers :func:`probe_radar_regime` reads: about 6 percent of a full read.
+PROBE_LAYERS = ("scales", "s1_asc_obs_count", "s1_desc_obs_count")
+
+
+def probe_radar_regime(ctx: RunContext, *, blocks: int = 8) -> dict[str, Any]:
+    """The majority radar regime of the AOI pixels valid in both years with the same regime (survey B5).
+
+    Up to ``blocks`` blocks spread over the AOI (:func:`spread_indices`) are read for both years,
+    scales and the two radar counts only; when none of them has a pixel valid in both years with
+    the same regime, the remaining blocks are read until one does. A pixel is valid with a finite,
+    positive scale. Ties go to radar. The deforest app has its own copy of this probe; this one is
+    for the apps built after it.
+
+    Args:
+        ctx: The run; its reader, plan, block shape and two years are used, and the years are marked read.
+        blocks: Blocks to probe before stopping.
+
+    Returns:
+        ``blocks_read``, ``blocks_total``, ``pixels_radar`` (radar in both years), ``pixels_optical``
+        (Sentinel-2 only in both), ``pixels_mismatch`` (the regime differs) and ``majority_radar``:
+        True for radar, False for optical-only, None when no probed pixel is valid in both years
+        with the same regime.
+    """
+    a, b = ctx.year_a, ctx.year_b
+    jobs = [(z, rs, cs) for z in ctx.plan.zones for rs, cs in z.blocks(ctx.reader.chunk_shape(z.zone), ctx.block)]
+    first = spread_indices(len(jobs), blocks)
+    chosen = set(first)
+    order = first + [i for i in range(len(jobs)) if i not in chosen]
+    radar = optical = mismatch = used = 0
+    for count, i in enumerate(order):
+        if count >= len(first) and radar + optical > 0:
+            break
+        z, rs, cs = jobs[i]
+        wins = ctx.reader.read_windows(z.zone, [a, b], rs, cs, layers=PROBE_LAYERS)
+        ctx.mark_read([a, b])
+        m = z.submask(rs, cs)
+        wa, wb = wins[a], wins[b]
+        both = wa.valid & (wa.scales > 0) & wb.valid & (wb.scales > 0) & m
+        ra, rb = wa.radar_present, wb.radar_present
+        radar += int((both & ra & rb).sum())
+        optical += int((both & ~ra & ~rb).sum())
+        mismatch += int((both & (ra != rb)).sum())
+        used += 1
+    majority = None if radar + optical == 0 else radar >= optical
+    return {
+        "blocks_read": used,
+        "blocks_total": len(jobs),
+        "pixels_radar": radar,
+        "pixels_optical": optical,
+        "pixels_mismatch": mismatch,
+        "majority_radar": majority,
+    }
+
+
+def regime_name(radar: bool | None) -> str:
+    """``"radar"``, ``"optical"`` (Sentinel-2 only) or ``"none"``."""
+    return "none" if radar is None else ("radar" if radar else "optical")
+
+
 def stride_for_preview(shape: Sequence[int], max_side: int = export.PREVIEW_MAX_SIDE) -> int:
     """Step that strides an image of ``shape`` (rows, cols, ...) down to at most ``max_side`` per side.
 
@@ -1080,6 +1139,7 @@ __all__ = [
     "BYTES_READ_NOTE",
     "FRAMEWORK_MODULES",
     "MEMORY_WARN_SHARE",
+    "PROBE_LAYERS",
     "AppInputError",
     "BandMosaic",
     "LoadedAOI",
@@ -1096,6 +1156,8 @@ __all__ = [
     "load_aoi",
     "mosaic_and_clean",
     "prepare_run",
+    "probe_radar_regime",
+    "regime_name",
     "spread_indices",
     "stride_for_preview",
     "zone_values_from_raster",

@@ -1351,3 +1351,392 @@ def test_deforest_live_window(tmp_path, monkeypatch):
     assert not any("transfers poorly" in w for w in result.report["warnings"])
     lag = s["validation"]["lag_aligned"]
     assert lag["window"]["lossyear_codes"] == [19, 20, 21] and lag["reference_pixels_scored"] > 0
+
+
+# --------------------------------------------------------------------------------------------
+# Wetland: end to end on the caldor fixture, validation from a local WorldCover tile
+# --------------------------------------------------------------------------------------------
+
+WETLAND_FILES = (
+    "wetland_2020_2022.tif",
+    "wetland_summary.parquet",
+    "wetland_summary.csv",
+    "wetland_seeds.parquet",
+    "wetland_preview.png",
+    "wetland_validation.json",
+    "wetland_report.json",
+)
+WETLAND_BANDS = ("score_2020", "score_2022", "extent_2020", "extent_2022", "change")
+#: 6 x 6 pixel seed squares (row, col) of the fixture window, in the stands the 2021 fire left alone.
+WETLAND_SEEDS = ((4, 4), (4, 52), (14, 40), (22, 6))
+WETLAND_KW = {"min_area_ha": 0.05, "block": (32, 32), "seed_buffer_m": 30.0, "coast_km": 0.1}
+
+
+def fixture_codes(n: int = 64) -> np.ndarray:
+    """A WorldCover map on the fixture grid: mangrove north, tree cover south, a wetland strip, water, no data."""
+    rows, cols = np.mgrid[0:n, 0:n]
+    codes = np.where(rows < 30, 95, 10).astype(np.uint8)
+    codes[(cols >= 28) & (cols < 34)] = 90
+    codes[(rows >= 56) & (cols < 8)] = 80
+    codes[rows >= 60] = 0
+    return codes
+
+
+@pytest.fixture
+def wetland_inputs(caldor_fixture, tmp_path, monkeypatch):
+    """AOI, seeds, a shoreline along fixture column 10 and WorldCover 2020 tiles over the fixture window."""
+    from .conftest import write_worldcover_tiles
+
+    monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
+    fx = caldor_fixture
+    a, _, c, _, _, f = (float(v) for v in fx["transform"])
+    aoi = fixture_window_lonlat(fx, (2, 62), (2, 62))
+    aoi_path = _feature_collection(tmp_path / "wetland_window.geojson", aoi, {"name": "wetland window"})
+    seeds = [fixture_window_lonlat(fx, (r, r + 6), (k, k + 6)) for r, k in WETLAND_SEEDS]
+    fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {"source": "fixture stands"}, "geometry": mapping(s)} for s in seeds
+        ],
+    }
+    seeds_path = tmp_path / "seeds.geojson"
+    seeds_path.write_text(json.dumps(fc), encoding="utf-8")
+    to_ll = Transformer.from_crs(int(fx["epsg"]), 4326, always_xy=True)
+    x = c + 10.5 * a
+    line = shapely.LineString([to_ll.transform(x, f + 200.0), to_ll.transform(x, f - 64 * a - 200.0)])
+    shore = _feature_collection(tmp_path / "shore.geojson", line, {})
+    template = write_worldcover_tiles(tmp_path / "worldcover", int(fx["epsg"]), c, f, {2020: fixture_codes()})
+    return aoi_path, aoi, seeds_path, shore, template
+
+
+def test_wetland_end_to_end_on_the_caldor_fixture(
+    caldor_reader, caldor_store, caldor_fixture, wetland_inputs, tmp_path
+):
+    from scipy.spatial.distance import cdist
+
+    from tessera_apps.apps import WetlandResult
+    from tessera_apps.apps import wetland as wl
+
+    aoi_path, aoi, seeds_path, shore, template = wetland_inputs
+    out = tmp_path / "out"
+    kwargs = {
+        **WETLAND_KW,
+        "seeds": seeds_path,
+        "shoreline": shore,
+        "validate": True,
+        "worldcover_url_template": template,
+        "reader": caldor_reader,
+    }
+    result = wl.run_wetland(aoi_path, 2020, 2022, out, **kwargs)
+    assert isinstance(result, WetlandResult) and not result.skipped and result.validation_written
+    paths = result.paths
+    for p in (*paths.required(need_validation=True), *result.extra_paths.values()):
+        assert p.is_file(), p
+    assert sorted(p.name for p in out.iterdir()) == sorted(WETLAND_FILES)
+
+    # A valid float32 COG with the five named bands, on the AOI's window.
+    ok, errors, _ = cog_validate(str(paths.tif))
+    assert ok, errors
+    plan = plan_aoi(caldor_reader, aoi)
+    (zp,) = plan.zones
+    with rasterio.open(paths.tif) as ds:
+        assert ds.descriptions == WETLAND_BANDS
+        assert ds.dtypes == ("float32",) * 5 and np.isnan(ds.nodata)
+        assert ds.transform == zp.transform and ds.shape == zp.shape
+        score_a, score_b, ext_a, ext_b, change = ds.read()
+    inside = zp.mask
+    s = result.summary
+    assert s["aoi_pixels"] == plan.n_pixels == 3600 == s["classified_pixels"]
+    assert s["zones"] == ["10N"] and (s["year_a"], s["year_b"]) == (2020, 2022)
+    for band in (score_a, score_b, change):
+        assert np.isfinite(band[inside]).all() and np.isnan(band[~inside]).all()
+
+    # The seeds: 144 pixels in 4 polygons, each polygon in its own fold.
+    seeds = pd.read_parquet(result.extra_paths["seeds"])
+    assert list(seeds.columns) == list(wl.SEED_COLUMNS)
+    assert len(seeds) == 144 and seeds["used"].all() and (seeds["drop_reason"] == "").all()
+    assert seeds["inside_aoi"].all() and (seeds["regime"] == "radar").all()
+    assert seeds.groupby("group")["fold"].nunique().max() == 1 and seeds["fold"].nunique() == 4
+    # The reference is the mean of the dequantized seed vectors; the score map is 1 - cosine to it.
+    quiet = TesseraReader.from_store(caldor_store[0])
+    pts = read_points(quiet, seeds["lon"].to_numpy(), seeds["lat"].to_numpy(), 2020)
+    assert pts.valid.all()
+    mean = pts.embeddings.astype(np.float64).mean(axis=0)
+    for year, band in ((2020, score_a), (2022, score_b)):
+        expected = 1.0 - metrics.cosine_to_vector(read_plan(quiet, zp, year), mean)
+        np.testing.assert_allclose(band[inside], expected[inside], atol=1e-5)
+    x = pts.embeddings.astype(np.float64)
+    np.testing.assert_allclose(
+        seeds["score_in_sample"], 1.0 - (x @ mean) / (np.linalg.norm(x, axis=1) * np.linalg.norm(mean)), atol=1e-6
+    )
+    # The threshold: the 95th percentile of the pooled held-out seed scores, not the in-sample one.
+    th = s["threshold"]
+    assert th["method"] == "heldout" and th["folds"] == 4 and th["heldout_pixels"] == 144
+    thr = th["threshold"]
+    assert thr == pytest.approx(float(np.percentile(seeds["score_heldout"], 95)))
+    assert th["in_sample_percentile"] == pytest.approx(float(np.percentile(seeds["score_in_sample"], 95)))
+    assert thr > th["in_sample_percentile"]
+    sb = seeds["score_year_b"].to_numpy()
+    pb = read_points(quiet, seeds["lon"].to_numpy(), seeds["lat"].to_numpy(), 2022)
+    xb = pb.embeddings.astype(np.float64)
+    np.testing.assert_allclose(sb, 1.0 - (xb @ mean) / (np.linalg.norm(xb, axis=1) * np.linalg.norm(mean)), atol=1e-6)
+    assert s["seeds"]["share_year_b_within_threshold"] == pytest.approx(float(np.mean(sb <= thr)))
+
+    # Extent: the cleaned score <= threshold; change +1 gain, -1 loss, 0 stable.
+    for score, ext in ((score_a, ext_a), (score_b, ext_b)):
+        expected = metrics.clean_mask(inside & (score <= thr), min_pixels=5) & inside
+        np.testing.assert_array_equal(ext == 1, expected)
+    gain, loss = (ext_b == 1) & (ext_a == 0), (ext_a == 1) & (ext_b == 0)
+    np.testing.assert_array_equal(change == 1, gain)
+    np.testing.assert_array_equal(change == -1, loss)
+    assert loss.sum() > 100  # the fire burned stands that were seed-like in 2020
+    n_a, n_b = int((ext_a == 1).sum()), int((ext_b == 1).sum())
+    assert s["extent"]["2020"]["extent_pixels"] == n_a and s["extent"]["2022"]["extent_pixels"] == n_b
+    assert s["extent_ha_year_a"] == pytest.approx(n_a * 0.01) and s["gain_ha"] == pytest.approx(gain.sum() * 0.01)
+    assert s["loss_ha"] == pytest.approx(loss.sum() * 0.01) and s["net_change_ha"] == pytest.approx((n_b - n_a) * 0.01)
+
+    # Coastal fraction: extent within 100 m of the shoreline along fixture column 10.
+    first_col = round((zp.transform.c - float(caldor_fixture["transform"][2])) / 10.0)
+    near = np.broadcast_to(np.abs(np.arange(zp.shape[1]) + first_col - 10) * 10.0 <= 100.0, zp.shape)
+    coast = s["coastal"]
+    assert coast["source"] == "file" and coast["file"] == "shore.geojson" and coast["coast_km"] == 0.1
+    assert s["coastal_fraction_year_a"] == pytest.approx(((ext_a == 1) & near).sum() / n_a)
+    assert s["coastal_fraction_year_b"] == pytest.approx(((ext_b == 1) & near).sum() / n_b)
+
+    # One summary row per year, the change columns repeated, the same in parquet and csv.
+    table = pd.read_parquet(paths.summary_parquet)
+    pd.testing.assert_frame_equal(table, pd.read_csv(paths.summary_csv), check_dtype=False)
+    assert table["year"].tolist() == [2020, 2022]
+    assert table["extent_ha"].tolist() == pytest.approx([n_a * 0.01, n_b * 0.01])
+    assert table["coastal_fraction"].tolist() == pytest.approx(
+        [s["coastal_fraction_year_a"], s["coastal_fraction_year_b"]]
+    )
+    for col in ("net_change_ha", "net_change_pct", "gain_ha", "loss_ha", "threshold", "score"):
+        assert table[col].nunique() == 1, col
+    assert table["gain_ha"].iloc[0] == pytest.approx(s["gain_ha"]) and table["score"].iloc[0] == "cosine"
+
+    # Validation: WorldCover 2020 only (2022 has no map), seeds and 30 m around them left out.
+    val = json.loads(paths.validation.read_text())
+    assert set(val["scores"]) == {
+        "extent_2020",
+        "extent_2020_per_zone",
+        "extent_2020_with_seeds",
+        "false_positive_classes_2020",
+    }
+    codes = validate.worldcover_map(zp, 2020, url_template=template)
+    ref, cover = (codes == 95) & inside, (codes != 0) & inside
+    sr = seeds["row"].to_numpy() - zp.rows.start
+    sc = seeds["col"].to_numpy() - zp.cols.start
+    rr, cc = np.mgrid[0 : zp.shape[0], 0 : zp.shape[1]]
+    dist = cdist(np.stack([rr.ravel(), cc.ravel()], 1), np.stack([sr, sc], 1)).min(axis=1).reshape(zp.shape) * 10.0
+    keep = cover & (dist > 30.0)
+    pred = ext_a == 1
+    tp, fp, fn = int((pred & ref & keep).sum()), int((pred & ~ref & keep).sum()), int((~pred & ref & keep).sum())
+    score = val["scores"]["extent_2020"]
+    assert (score["tp"], score["fp"], score["fn"], score["n"]) == (tp, fp, fn, int(keep.sum()))
+    v = s["validation"]
+    assert v["source"] == "worldcover" and v["year"] == 2020
+    assert v["years_scored"] == [2020] and v["years_not_covered"] == [2022]
+    assert v["recall"] == pytest.approx(tp / (tp + fn)) and v["precision"] == pytest.approx(tp / (tp + fp))
+    row = v["per_year"]["2020"]
+    assert row["seed_excluded_pixels"] == int((cover & (dist <= 30.0)).sum()) > 144
+    fp_codes, fp_counts = np.unique(codes[pred & ~ref & keep], return_counts=True)
+    assert {k: w["pixels"] for k, w in row["false_positive_classes"].items()} == {
+        str(int(k)): int(n) for k, n in zip(fp_codes, fp_counts, strict=True)
+    }
+    ref_rec = val["reference"]
+    assert ref_rec["source"] == "worldcover" and ref_rec["versions"] == {"2020": "v100"}
+    assert ref_rec["url_template"] == template and ref_rec["years_not_covered"] == [2022]
+    caveats = " ".join(val["caveats"])
+    for text in ("leaving out the seed pixels", "itself a model", "no map for 2022", "30 m"):
+        assert text in caveats, text
+
+    # The report: provenance, the seed chunks in the byte estimate, extras and timings.
+    report = json.loads(paths.report.read_text())
+    assert report == result.report and report["app"] == "wetland"
+    _, log = caldor_store
+    assert report["provenance"]["years"] == [2020, 2022] == years_in(log)
+    assert report["provenance"]["years_checked"] == [2020, 2022]
+    assert set(report["extra_outputs"]) == {"seeds"}
+    assert 0 < report["bytes_read"] <= report["estimated_bytes"]
+    chunk_bytes = 32 * 32 * BYTES_PER_PIXEL
+    n_chunks = len(wl.seed_chunks(caldor_reader, wl.place_seeds(caldor_reader, wl.load_seeds(seeds_path))))
+    assert (
+        report["estimated_bytes"] == plan.estimated_bytes(caldor_reader, 3, block=(32, 32)) + 2 * n_chunks * chunk_bytes
+    )
+    assert report["estimated_memory"] == wl.memory_estimate(plan, block=(32, 32), coast_km=0.1)
+    assert set(report["timings"]) >= {"regime_probe", "seeds_read", "reference", "stream", "clean", "coastal", "write"}
+    assert report["params"]["worldcover_url_template"] == template and report["params"]["score"] == "cosine"
+    assert s["radar"]["seed_regime"] == "radar" and s["radar"]["regime_mismatch_pixels"] == 0
+    assert s["storm_note"] is None and not report["warnings"]
+
+    # Rerunning with the same arguments skips without reading a chunk; the same run elsewhere is identical.
+    chunks_before = len(log.chunk_keys())
+    again = wl.run_wetland(aoi_path, 2020, 2022, out, **kwargs)
+    assert again.skipped and again.report == report and again.validation_written
+    assert len(log.chunk_keys()) == chunks_before
+    twin = wl.run_wetland(aoi_path, 2020, 2022, tmp_path / "twin", **kwargs)
+    assert twin.report["outputs"] == report["outputs"] and twin.report["extra_outputs"] == report["extra_outputs"]
+    # Changing an option reruns.
+    other = wl.run_wetland(aoi_path, 2020, 2022, out, **{**kwargs, "threshold_pct": 90.0})
+    assert not other.skipped and other.summary["threshold"]["threshold"] < thr
+
+
+def test_cli_wetland_runs_skips_and_validates(cli_reader, wetland_inputs, tmp_path, monkeypatch):
+    aoi_path, _, seeds_path, shore, template = wetland_inputs
+    monkeypatch.setattr(validate, "WORLDCOVER_URL_TEMPLATE", template)
+    out = tmp_path / "cli_out"
+    args = ["wetland", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
+    args += ["--seeds", str(seeds_path), "--shoreline", str(shore), "--coast-km", "0.1", "--validate"]
+    args += ["--min-area-ha", "0.05", "--seed-buffer-m", "30"]
+    runner = CliRunner()
+    first = runner.invoke(app, args, env={"COLUMNS": "200"})
+    assert first.exit_code == 0, (first.output, first.exception)
+    for text in (
+        "Wetland 2020 to 2022",
+        "Seeds:",
+        "144 of 144 pixels used",
+        "spatial folds",
+        "held-out seed scores",
+        "Extent",
+        "Change: net",
+        "Coastal fraction within 0.1 km",
+        "Radar: seeds' regime radar",
+        "Validation (worldcover 2020): recall",
+        "false positives by WorldCover class",
+        "not scored (no reference map): 2022",
+        "GB of chunks",
+    ):
+        assert text in first.stdout, text
+    report = json.loads((out / "wetland_report.json").read_text())
+    assert report["params"]["worldcover_url_template"] == template
+    assert (out / "wetland_validation.json").is_file() and (out / "wetland_seeds.parquet").is_file()
+    second = runner.invoke(app, args)
+    assert second.exit_code == 0, second.output
+    assert "current" in second.stdout and "--force" in second.stdout
+    assert json.loads((out / "wetland_report.json").read_text()) == report
+
+
+def test_cli_wetland_errors_exit_2_before_reading(cli_reader, caldor_store, wetland_inputs, tmp_path):
+    _, log = caldor_store
+    aoi_path, _, seeds_path, shore, _ = wetland_inputs
+    lines = _feature_collection(tmp_path / "lines.geojson", shapely.LineString([(-120.3, 38.6), (-120.2, 38.7)]), {})
+    base = ["wetland", "--aoi", str(aoi_path), "--out", str(tmp_path / "o"), "--shoreline", str(shore)]
+    ok = ["--year-a", "2020", "--year-b", "2022", "--seeds", str(seeds_path)]
+    cases = [
+        (["--year-a", "2022", "--year-b", "2020", "--seeds", str(seeds_path)], "must be after year_a"),
+        ([*ok, "--reference-classes", "95,x"], "--reference-classes"),
+        ([*ok, "--reference-classes", "97"], "no class"),
+        ([*ok, "--score", "mahalanobis"], "at least 500"),
+        ([*ok, "--score", "knn"], "must be one of"),
+        (["--year-a", "2020", "--year-b", "2022", "--seeds", str(lines)], "no point or polygon"),
+        (["--year-a", "2020", "--year-b", "2022"], "No --seeds"),
+        (["--year-a", "2022", "--year-b", "2024", "--seeds", str(seeds_path), "--validate"], "2020 (v100)"),
+        ([*ok, "--reference-source", "gmw", "--gmw-version", "v3.1"], "gmw_version"),
+    ]
+    for extra, message in cases:
+        result = CliRunner().invoke(app, [*base, *extra], env={"COLUMNS": "300"})
+        assert result.exit_code == EXIT_USAGE, (extra, result.output)
+        assert message in result.stderr, (extra, result.stderr)
+    assert log.chunk_keys() == [] and not (tmp_path / "o" / "wetland_report.json").exists()
+
+
+def test_cli_wetland_strict_validate_stops_before_reading(
+    cli_reader, caldor_store, wetland_inputs, tmp_path, monkeypatch
+):
+    def unreachable(*args, **kwargs):
+        raise validate.ReferenceUnavailableError("esa-worldcover.s3.eu-central-1.amazonaws.com refused (403)")
+
+    monkeypatch.setattr(validate, "worldcover_map", unreachable)
+    _, log = caldor_store
+    aoi_path, _, seeds_path, shore, _ = wetland_inputs
+    out = tmp_path / "out"
+    args = ["wetland", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
+    args += ["--seeds", str(seeds_path), "--shoreline", str(shore), "--validate", "--min-area-ha", "0.05"]
+    strict = CliRunner().invoke(app, [*args, "--strict-validate"])
+    assert strict.exit_code == EXIT_VALIDATION, strict.output
+    assert "--strict-validate" in strict.stderr and "esa-worldcover" in strict.stderr
+    assert log.chunk_keys() == [] and not (out / "wetland_report.json").exists()
+    relaxed = CliRunner().invoke(app, args)
+    assert relaxed.exit_code == 0, relaxed.output
+    assert "Validation: not done" in relaxed.stdout and not (out / "wetland_validation.json").exists()
+
+
+def test_cli_wetland_forwards_every_option(monkeypatch, tmp_path):
+    from tessera_apps.apps import WetlandResult
+
+    seen = {}
+
+    def record(aoi, year_a, year_b, out, **kwargs):
+        seen.update(kwargs, aoi=aoi, year_a=year_a, year_b=year_b, out=out)
+        return WetlandResult(
+            report={"summary": {}},
+            paths=export.output_paths(Path(out), "wetland", year_a, year_b),
+            extra_paths={},
+            skipped=False,
+            validation_written=True,
+        )
+
+    monkeypatch.setattr("tessera_apps.apps.run_wetland", record)
+    ref = tmp_path / "r.geojson"
+    ref.write_text("{}")
+    shore = tmp_path / "s.geojson"
+    shore.write_text("{}")
+    args = ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024", "--out", str(tmp_path)]
+    args += ["--seeds", "my_seeds.gpkg", "--reference", str(ref), "--reference-source", "gmw"]
+    args += ["--reference-classes", "95, 90", "--gmw-version", "v4.1.12", "--score", "mahalanobis"]
+    args += ["--threshold-pct", "90", "--folds", "3", "--min-area-ha", "0.5", "--seed-buffer-m", "150"]
+    args += ["--shoreline", str(shore), "--coast-km", "2.5", "--seed", "7", "--force", "--snapshot", "SNAP"]
+    args += ["--i-know-this-is-large", "--strict-validate"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert seen["aoi"] == "everglades" and (seen["year_a"], seen["year_b"], seen["out"]) == (2020, 2024, tmp_path)
+    assert seen["seeds"] == "my_seeds.gpkg" and seen["validate"] is True and seen["reference"] == ref
+    assert seen["reference_source"] == "gmw" and seen["reference_classes"] == [95, 90]
+    assert seen["gmw_version"] == "v4.1.12" and seen["score"] == "mahalanobis"
+    assert (seen["threshold_pct"], seen["folds"], seen["min_area_ha"], seen["seed_buffer_m"]) == (90.0, 3, 0.5, 150.0)
+    assert seen["shoreline"] == shore and seen["coast_km"] == 2.5 and seen["seed"] == 7
+    assert seen["force"] is True and seen["snapshot_id"] == "SNAP" and seen["max_area_km2"] is None
+    assert seen["strict_validate"] is True
+    seen.clear()
+    defaults = CliRunner().invoke(app, ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024"])
+    assert defaults.exit_code == 0, defaults.output
+    # --aoi everglades with no --seeds: run_wetland takes the bundled everglades seeds (seeds None).
+    assert seen["seeds"] is None and seen["validate"] is False and seen["reference"] is None
+    assert seen["reference_source"] == "worldcover" and seen["reference_classes"] == [95]
+    assert seen["gmw_version"] == "v3" and seen["score"] == "cosine"
+    assert (seen["threshold_pct"], seen["folds"], seen["min_area_ha"], seen["seed_buffer_m"]) == (95.0, 5, 0.1, 200.0)
+    assert seen["shoreline"] is None and seen["coast_km"] == 1.0 and seen["seed"] == 0
+    assert seen["max_area_km2"] == 10_000 and seen["snapshot_id"] is None and seen["force"] is False
+    assert seen["strict_validate"] is False and seen["out"] == Path("out")
+
+
+#: About 1 x 1 km of mangrove coast inside the Everglades demo AOI, around bundled seed 8 (about 56
+#: percent WorldCover mangrove in 2020 and 2021).
+EVERGLADES_WINDOW = box(-81.3545, 25.8341, -81.3445, 25.8431)
+
+
+@pytest.mark.network
+def test_wetland_live_window(tmp_path, monkeypatch):
+    from tessera_apps.apps import wetland as wl
+
+    for key in [k for k in os.environ if k.startswith("AWS_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
+    aoi = _feature_collection(tmp_path / "live.geojson", EVERGLADES_WINDOW, {})
+    result = wl.run_wetland(
+        aoi, 2020, 2021, tmp_path / "out", seeds="everglades_seeds", validate=True, snapshot_id=LIVE_SNAPSHOT
+    )
+    s = result.summary
+    assert s["zones"] == ["17N"] and s["seeds"]["source"] == "demo:everglades_seeds"
+    assert s["seeds"]["pixels"] == 1200 and s["seeds"]["used"] >= 1100 and s["seeds"]["groups"] == 12
+    assert s["threshold"]["method"] == "heldout" and s["threshold"]["folds"] == 5
+    assert s["threshold"]["threshold"] > s["threshold"]["in_sample_percentile"]
+    assert result.report["provenance"]["store"]["snapshot_id"] == LIVE_SNAPSHOT
+    assert 0 < result.report["bytes_read"] <= result.report["estimated_bytes"]
+    val = s["validation"]
+    assert val["source"] == "worldcover" and val["years_scored"] == [2020, 2021]
+    assert val["per_year"]["2020"]["pixels_scored"] > 0 and val["recall"] is not None
+    assert "same product" in " ".join(json.loads(result.paths.validation.read_text())["caveats"])
+    assert s["coastal"]["source"] == "natural_earth_10m" and s["coastal"]["approximate"] is True
+    assert s["coastal_fraction_year_a"] is not None and s["storm_note"] and "Irma" in s["storm_note"]

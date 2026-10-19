@@ -1,0 +1,629 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 1,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 0 col 0",
+    "component_pixels_eroded": 442688,
+    "zone": "17N",
+    "zone_rows": [
+     646985,
+     646995
+    ],
+    "zone_cols": [
+     27995,
+     28005
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.5613635,
+       25.9379259
+      ],
+      [
+       -81.5613678,
+       25.9388289
+      ],
+      [
+       -81.5603691,
+       25.9388327
+      ],
+      [
+       -81.5603648,
+       25.9379298
+      ],
+      [
+       -81.5613635,
+       25.9379259
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 2,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 0 col 1",
+    "component_pixels_eroded": 941,
+    "zone": "17N",
+    "zone_rows": [
+     647180,
+     647190
+    ],
+    "zone_cols": [
+     28862,
+     28872
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.4747091,
+       25.9206277
+      ],
+      [
+       -81.4747127,
+       25.9215307
+      ],
+      [
+       -81.4737142,
+       25.921534
+      ],
+      [
+       -81.4737106,
+       25.920631
+      ],
+      [
+       -81.4747091,
+       25.9206277
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 3,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 0 col 2",
+    "component_pixels_eroded": 990,
+    "zone": "17N",
+    "zone_rows": [
+     647401,
+     647411
+    ],
+    "zone_cols": [
+     29645,
+     29655
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.3964578,
+       25.900907
+      ],
+      [
+       -81.3964608,
+       25.9018099
+      ],
+      [
+       -81.3954625,
+       25.9018127
+      ],
+      [
+       -81.3954595,
+       25.9009097
+      ],
+      [
+       -81.3964578,
+       25.900907
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 4,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 0 col 3",
+    "component_pixels_eroded": 318,
+    "zone": "17N",
+    "zone_rows": [
+     647411,
+     647421
+    ],
+    "zone_cols": [
+     29687,
+     29697
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.3922617,
+       25.9000154
+      ],
+      [
+       -81.3922647,
+       25.9009184
+      ],
+      [
+       -81.3912663,
+       25.9009211
+      ],
+      [
+       -81.3912634,
+       25.9000181
+      ],
+      [
+       -81.3922617,
+       25.9000154
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 5,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 1 col 0",
+    "component_pixels_eroded": 6209,
+    "zone": "17N",
+    "zone_rows": [
+     647767,
+     647777
+    ],
+    "zone_cols": [
+     28000,
+     28010
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.5605304,
+       25.8673168
+      ],
+      [
+       -81.5605347,
+       25.8682197
+      ],
+      [
+       -81.5595366,
+       25.8682236
+      ],
+      [
+       -81.5595323,
+       25.8673206
+      ],
+      [
+       -81.5605304,
+       25.8673168
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 6,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 1 col 1",
+    "component_pixels_eroded": 9010,
+    "zone": "17N",
+    "zone_rows": [
+     647820,
+     647830
+    ],
+    "zone_cols": [
+     28182,
+     28192
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.5423439,
+       25.8626001
+      ],
+      [
+       -81.542348,
+       25.863503
+      ],
+      [
+       -81.54135,
+       25.8635068
+      ],
+      [
+       -81.5413459,
+       25.8626038
+      ],
+      [
+       -81.5423439,
+       25.8626001
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 7,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 1 col 2",
+    "component_pixels_eroded": 390113,
+    "zone": "17N",
+    "zone_rows": [
+     647470,
+     647480
+    ],
+    "zone_cols": [
+     29092,
+     29102
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.4516434,
+       25.894515
+      ],
+      [
+       -81.4516468,
+       25.895418
+      ],
+      [
+       -81.4506485,
+       25.8954211
+      ],
+      [
+       -81.4506451,
+       25.8945181
+      ],
+      [
+       -81.4516434,
+       25.894515
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 8,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 1 col 3",
+    "component_pixels_eroded": 273539,
+    "zone": "17N",
+    "zone_rows": [
+     648097,
+     648107
+    ],
+    "zone_cols": [
+     30109,
+     30119
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.3499484,
+       25.8381784
+      ],
+      [
+       -81.3499511,
+       25.8390814
+      ],
+      [
+       -81.3489532,
+       25.8390838
+      ],
+      [
+       -81.3489506,
+       25.8381808
+      ],
+      [
+       -81.3499484,
+       25.8381784
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 9,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 2 col 1",
+    "component_pixels_eroded": 2199,
+    "zone": "17N",
+    "zone_rows": [
+     648304,
+     648314
+    ],
+    "zone_cols": [
+     28891,
+     28901
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.4714105,
+       25.8191432
+      ],
+      [
+       -81.4714141,
+       25.8200462
+      ],
+      [
+       -81.4704164,
+       25.8200494
+      ],
+      [
+       -81.4704128,
+       25.8191464
+      ],
+      [
+       -81.4714105,
+       25.8191432
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 10,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 2 col 2",
+    "component_pixels_eroded": 17370,
+    "zone": "17N",
+    "zone_rows": [
+     648323,
+     648333
+    ],
+    "zone_cols": [
+     29389,
+     29399
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.4217204,
+       25.8175802
+      ],
+      [
+       -81.4217236,
+       25.8184832
+      ],
+      [
+       -81.4207259,
+       25.818486
+      ],
+      [
+       -81.4207227,
+       25.8175831
+      ],
+      [
+       -81.4217204,
+       25.8175802
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 11,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 2 col 3",
+    "component_pixels_eroded": 83186,
+    "zone": "17N",
+    "zone_rows": [
+     648883,
+     648893
+    ],
+    "zone_cols": [
+     30243,
+     30253
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.3363769,
+       25.7672346
+      ],
+      [
+       -81.3363794,
+       25.7681376
+      ],
+      [
+       -81.3353822,
+       25.7681399
+      ],
+      [
+       -81.3353796,
+       25.7672369
+      ],
+      [
+       -81.3363769,
+       25.7672346
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "seed",
+    "seed_id": 12,
+    "class": "mangrove",
+    "source": "ESA WorldCover 2020 v100, class 95 (mangroves)",
+    "method": "WorldCover 2020 class 95 inside the AOI on the TESSERA zone 17N 10 m grid, eroded by 5 pixels (about 50 m, 3 x 3 structuring element) to keep stand interiors; 8-connected components; the AOI window split into a 4 x 3 grid and the largest component whose centroid falls in each cell picked (a cell with none is filled with the unpicked component farthest from those already picked); one 10 x 10 pixel (100 m) square wholly inside each eroded component, at the feasible position nearest its centroid (scripts/make_everglades_seeds.py).",
+    "date": "2026-10-16",
+    "note": "These seeds and the default WorldCover validation reference come from the same product, so the wetland app's score against WorldCover is not independent of its seeds. Global Mangrove Watch stands should replace them where zenodo.org is reachable (it is blocked from the build environment).",
+    "grid_cell": "row 2 col 0 (empty, filled with the farthest component)",
+    "component_pixels_eroded": 704,
+    "zone": "17N",
+    "zone_rows": [
+     647237,
+     647247
+    ],
+    "zone_cols": [
+     27431,
+     27441
+    ],
+    "pixels": 100,
+    "store_snapshot": "B6AFRJGX5XQC0A716PA0"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -81.6175685,
+       25.9149426
+      ],
+      [
+       -81.6175732,
+       25.9158455
+      ],
+      [
+       -81.6165747,
+       25.9158497
+      ],
+      [
+       -81.61657,
+       25.9149468
+      ],
+      [
+       -81.6175685,
+       25.9149426
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}
