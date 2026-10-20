@@ -16,11 +16,14 @@ import math
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
 from tessera_apps import __version__
+
+if TYPE_CHECKING:
+    from rich.console import Console
 
 app = typer.Typer(help="Climate applications on the TESSERA v1.1 global embeddings.", no_args_is_help=True)
 
@@ -90,9 +93,41 @@ def _fmt(value: Any, spec: str = ".3f") -> str:  # noqa: ANN401
     return format(value, spec)
 
 
+def _print_severity(console: Console, sev: Mapping[str, Any]) -> None:
+    """The severity scores of a wildfire run: per-class detection, then the binary scores."""
+    from rich.table import Table
+
+    from tessera_apps.apps.wildfire import SEVERITY_HEADLINE_ORDER, SEVERITY_NAMES
+
+    what = "Sentinel-2 dNBR proxy, not MTBS" if sev.get("proxy") else "severity map"
+    table = Table(title=f"Burned mask against {sev.get('file')} ({what})")
+    for col in ("class", "detected", "burned px in class"):
+        table.add_column(col, justify="right")
+    rates = sev.get("detection_rate_by_class") or {}
+    where = sev.get("detections_by_class") or {}
+    for c in SEVERITY_HEADLINE_ORDER:
+        table.add_row(f"{c} {SEVERITY_NAMES[c]}", _fmt(rates.get(str(c)), ".1%"), _fmt(where.get(str(c)), ".1%"))
+    console.print(table)
+    low = sev.get("low_or_worse") or {}
+    excluded = sev.get("excluded") or {}
+    console.print(
+        f"Severity, class {sev.get('min_class')} ({sev.get('min_class_name')}) or worse: IoU {_fmt(sev.get('iou'))}, "
+        f"precision {_fmt(sev.get('precision'))}, recall {_fmt(sev.get('recall'))}, F1 {_fmt(sev.get('f1'))}; "
+        f"low or worse: IoU {_fmt(low.get('iou'))}, precision {_fmt(low.get('precision'))}, recall "
+        f"{_fmt(low.get('recall'))}, F1 {_fmt(low.get('f1'))}"
+    )
+    background, non_processing = excluded.get("background_pixels"), excluded.get("non_processing_pixels")
+    console.print(
+        f"Severity: burned pixels in background or outside the map {_fmt(where.get('0'), '.1%')}, in "
+        f"non-processing {_fmt(where.get('6'), '.1%')}; excluded classified pixels: {_fmt(background, ',')} "
+        f"background, {_fmt(non_processing, ',')} non-processing"
+    )
+
+
 def _print_wildfire(report: Mapping[str, Any], *, skipped: bool, out: Path, validation_redone: bool = False) -> None:
-    """The run summary: burned area, threshold, recovery table, validation, cost."""
+    """The run summary: burned area, threshold, recovery table, the validation headline and scores, cost."""
     from rich.console import Console
+    from rich.markup import escape
     from rich.table import Table
 
     console = Console()
@@ -148,15 +183,21 @@ def _print_wildfire(report: Mapping[str, Any], *, skipped: bool, out: Path, vali
             f"is {_fmt(pre.get('median'))} before the fire and {_fmt(post.get('median'))} after it"
         )
     val = s.get("validation")
+    head = s.get("headline")
+    if isinstance(head, Mapping) and head.get("text"):
+        console.print(f"[bold]Headline:[/bold] {escape(str(head['text']))}")
+    sev = val.get("severity") if isinstance(val, Mapping) else None
+    if isinstance(sev, Mapping):
+        _print_severity(console, sev)
     if isinstance(val, Mapping) and "iou" in val:
         console.print(
-            f"Validation ({val.get('source')}): IoU {_fmt(val.get('iou'))}, precision {_fmt(val.get('precision'))}, "
-            f"recall {_fmt(val.get('recall'))}, F1 {_fmt(val.get('f1'))}; recall inside reference "
-            f"{_fmt(val.get('recall_inside_reference'))}, burned outside reference "
+            f"Validation ({val.get('source')}): recall inside reference {_fmt(val.get('recall_inside_reference'))}, "
+            f"IoU {_fmt(val.get('iou'))}, precision {_fmt(val.get('precision'))}, recall {_fmt(val.get('recall'))}, "
+            f"F1 {_fmt(val.get('f1'))}; burned outside reference "
             f"{_fmt(val.get('burned_outside_reference_fraction'), '.1%')}"
         )
     elif isinstance(val, Mapping) and "error" in val:
-        console.print(f"Validation: not done ({val['error']})")
+        console.print(f"Validation: not done ({escape(str(val['error']))})")
     wall = (report.get("timings") or {}).get("wall_s")
     cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
     console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
@@ -207,6 +248,23 @@ def wildfire(
             help="Stop with exit code 3, before reading any chunk, when --validate cannot load its reference.",
         ),
     ] = False,
+    severity: Annotated[
+        Path | None,
+        typer.Option(
+            "--severity",
+            help=(
+                "Burn severity GeoTIFF in MTBS dnbr6 codes (0 to 6, any CRS) to score the burned mask against, per "
+                "class; with or without --validate."
+            ),
+        ),
+    ] = None,
+    severity_min_class: Annotated[
+        int,
+        typer.Option(
+            "--severity-min-class",
+            help="Lowest severity class counted as burned: 1 unburned to low, 2 low, 3 moderate, 4 high.",
+        ),
+    ] = 3,
 ) -> None:
     """Map a burn scar between two years and track its recovery through --recovery-through."""
     from tessera_apps import io
@@ -231,6 +289,8 @@ def wildfire(
                 max_area_km2=None if i_know_this_is_large else io.MAX_AOI_KM2,
                 snapshot_id=snapshot,
                 strict_validate=strict_validate and do_validate,
+                severity=severity,
+                severity_min_class=severity_min_class,
             )
         except StrictValidationError as exc:
             raise _fail(f"Error: {_error_text(exc)}", EXIT_VALIDATION) from exc
