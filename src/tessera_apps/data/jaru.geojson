@@ -1,0 +1,277 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "aoi",
+    "name": "Jaru, Rondonia: natural regrowth on abandoned pasture (synthetic restore demo site)",
+    "synthetic": true,
+    "planted": 2019,
+    "source": "Synthetic demo site, not a documented project: no planting record with a public polygon could be reached from the build environment (USFS FACTS, Restor and others are blocked), so this site was located from independent public layers (GLAD annual tree canopy height 2015 to 2024, Hansen GFC v1.13, ESA WorldCover, Sentinel-2 imagery). A fenced paddock of about 32 ha, 5 km southeast of Jaru in Rondonia (UTM 20S), cleared before 2000 (Hansen treecover2000 under 1 percent) and pasture through 2018 (shrubby 'dirty' pasture in 2018 and 2019 imagery). GLAD canopy height is 0 on 99 percent of its pixels in 2015 to 2018 and 92 percent in 2019, then 5 m or more on 64 percent in 2020 and 91 percent in 2021 (14 m mean by 2024, mixed heights, no planting rows): natural regrowth, so 2019 is the year the regrowth took hold, not a planting date. No Hansen loss in any year. The 1 to 3 km ring is 77 percent open pasture that stayed open.",
+    "land_use": "natural regrowth on abandoned pasture",
+    "area_ha": 32.1
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -62.426726,
+       -10.480615
+      ],
+      [
+       -62.426726,
+       -10.481222
+      ],
+      [
+       -62.426041,
+       -10.48145
+      ],
+      [
+       -62.424676,
+       -10.48054
+      ],
+      [
+       -62.421524,
+       -10.477388
+      ],
+      [
+       -62.421524,
+       -10.476539
+      ],
+      [
+       -62.420624,
+       -10.476314
+      ],
+      [
+       -62.421719,
+       -10.473686
+      ],
+      [
+       -62.422724,
+       -10.473083
+      ],
+      [
+       -62.425443,
+       -10.475349
+      ],
+      [
+       -62.42515,
+       -10.476521
+      ],
+      [
+       -62.42619,
+       -10.476521
+      ],
+      [
+       -62.425915,
+       -10.478722
+      ],
+      [
+       -62.426372,
+       -10.478493
+      ],
+      [
+       -62.426191,
+       -10.479399
+      ],
+      [
+       -62.427484,
+       -10.480046
+      ],
+      [
+       -62.426726,
+       -10.480615
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "target",
+    "name": "Mature forest stand 7.5 km southeast of the Jaru site",
+    "source": "A 25 ha disk with GLAD canopy height 20 m or more on every pixel in every year 2015 to 2024 (mean 26.9 m), Hansen treecover2000 82 or more (mean 94), no Hansen loss.",
+    "area_ha": 24.8
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -62.379298,
+       -10.53012
+      ],
+      [
+       -62.379348,
+       -10.529623
+      ],
+      [
+       -62.379496,
+       -10.529144
+      ],
+      [
+       -62.379735,
+       -10.528704
+      ],
+      [
+       -62.380056,
+       -10.528318
+      ],
+      [
+       -62.380447,
+       -10.528002
+      ],
+      [
+       -62.380893,
+       -10.527767
+      ],
+      [
+       -62.381377,
+       -10.527623
+      ],
+      [
+       -62.38188,
+       -10.527575
+      ],
+      [
+       -62.382383,
+       -10.527625
+      ],
+      [
+       -62.382866,
+       -10.527771
+      ],
+      [
+       -62.383311,
+       -10.528007
+      ],
+      [
+       -62.383701,
+       -10.528325
+      ],
+      [
+       -62.384021,
+       -10.528712
+      ],
+      [
+       -62.384258,
+       -10.529154
+      ],
+      [
+       -62.384404,
+       -10.529632
+      ],
+      [
+       -62.384452,
+       -10.53013
+      ],
+      [
+       -62.384402,
+       -10.530627
+      ],
+      [
+       -62.384254,
+       -10.531106
+      ],
+      [
+       -62.384015,
+       -10.531546
+      ],
+      [
+       -62.383694,
+       -10.531932
+      ],
+      [
+       -62.383303,
+       -10.532248
+      ],
+      [
+       -62.382857,
+       -10.532483
+      ],
+      [
+       -62.382373,
+       -10.532627
+      ],
+      [
+       -62.38187,
+       -10.532675
+      ],
+      [
+       -62.381367,
+       -10.532625
+      ],
+      [
+       -62.380884,
+       -10.532479
+      ],
+      [
+       -62.380439,
+       -10.532243
+      ],
+      [
+       -62.380049,
+       -10.531925
+      ],
+      [
+       -62.379729,
+       -10.531538
+      ],
+      [
+       -62.379492,
+       -10.531096
+      ],
+      [
+       -62.379346,
+       -10.530618
+      ],
+      [
+       -62.379298,
+       -10.53012
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "role": "negative",
+    "name": "Pasture that stayed pasture, 3.5 km east of the Jaru site",
+    "planted": 2019,
+    "source": "A 33 ha square with GLAD canopy height 0 on every pixel in every year 2015 to 2024, no Hansen loss in any year, WorldCover 2020 and 2021 grassland.",
+    "area_ha": 33.4
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -62.3965,
+       -10.4725
+      ],
+      [
+       -62.3965,
+       -10.47775
+      ],
+      [
+       -62.39125,
+       -10.47775
+      ],
+      [
+       -62.39125,
+       -10.4725
+      ],
+      [
+       -62.3965,
+       -10.4725
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

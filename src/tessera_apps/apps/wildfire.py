@@ -52,14 +52,18 @@ Brief section 4.1, as corrected by the pre-build survey, checkpoint 2 and the ch
 - **Burn severity** (the owner's checkpoint 3 decision). ``--severity`` scores the burned mask
   against a thematic severity map in MTBS dnbr6 codes, in any CRS, read onto every zone plan with
   nearest resampling and checked in the preflight (:func:`load_severity`). The scores
-  (:func:`score_against_severity`) are the detection rate of each class 1 to 5, IoU, precision,
-  recall and F1 against class ``--severity-min-class`` (moderate) or worse and against low or
-  worse, and where the burned pixels fall; they go into ``validation.json`` as a ``severity`` block
-  next to the outline scores (NIFC or ``--reference``; both can be given). With a severity map the
-  brief's IoU 0.6 stop rule reads its IoU, otherwise the outline IoU together with recall inside
-  the reference (:func:`stop_rule`), and the summary's headline (:func:`headline`) puts them in
-  that order. The Sentinel-2 dNBR proxy of ``scripts/make_caldor_dnbr.py`` is named as such from
-  its ``TESSERA_APPS_SOURCE`` tag.
+  (:func:`score_against_severity`) are the detection rate of each class 0 to 5, IoU, precision,
+  recall and F1 against class ``--severity-min-class`` or worse, against moderate or worse and
+  against low or worse, and where the burned pixels fall; they go into ``validation.json`` as a
+  ``severity`` block next to the outline scores (NIFC or ``--reference``; both can be given). The
+  scores cover the classified AOI pixels the map covers, background (class 0, outside the mapped
+  burn) included as unburned land, so detections outside the burn count against precision. With
+  a severity map the brief's IoU 0.6 stop rule reads its IoU against moderate or worse, whatever
+  ``--severity-min-class`` is, otherwise the outline IoU together with recall inside the
+  reference (:func:`stop_rule`), and the summary's headline (:func:`headline`) puts them in that
+  order. The Sentinel-2 dNBR proxy of ``scripts/make_caldor_dnbr.py`` is named as such from its
+  ``TESSERA_APPS_SOURCE`` tag. Adding ``--validate`` to a run that had only ``--severity`` redoes
+  the validation from the outputs on disk, without reading a chunk.
 """
 
 from __future__ import annotations
@@ -158,6 +162,8 @@ HISTOGRAM_BINS = 128
 WRITE_CACHE_BYTES = 128 * 2**20
 #: Start of the warning a run records when it could not load its validation reference.
 VALIDATION_SKIPPED = "Validation skipped, the reference could not be loaded"
+#: End of the warning a run records when the stop rule trips (:func:`stop_rule`).
+STOP_WARNING = "stop and report (brief section 8)."
 #: Peak memory model (bytes), from synthetic two-zone AOIs of 4.5 and 10.6 million window pixels:
 #: the stream holds the per-pixel arrays (distance, similarities, radar flags, false colour,
 #: pre-fire distance) and one block of every year read; the recovery and write stages hold the
@@ -187,12 +193,19 @@ SEVERITY_LOW = 2
 SEVERITY_HIGH = 4
 SEVERITY_GREENER = 5
 SEVERITY_NON_PROCESSING = 6
-#: Classes whose pixels are scored, each with its own detection rate.
-SEVERITY_SCORED = (1, 2, 3, 4, 5)
+#: Code of the per-zone arrays of :func:`load_severity` for pixels the map does not cover (outside
+#: its extent or on its nodata) and pixels outside the AOI: never scored.
+SEVERITY_UNMAPPED = 255
+#: Classes whose classified pixels are scored, each with its own detection rate: background (0,
+#: outside the mapped burn) and increased greenness (5) are unburned land in the binary scores.
+SEVERITY_SCORED = (0, 1, 2, 3, 4, 5)
 #: The order the headline lists the per-class detection rates in.
 SEVERITY_HEADLINE_ORDER = (4, 3, 2, 1, 5)
 #: Lowest class counted as burned by default (moderate).
 DEFAULT_SEVERITY_MIN_CLASS = 3
+#: The brief's stop rule reads the IoU against this class or worse (moderate), whatever
+#: ``--severity-min-class`` is.
+SEVERITY_STOP_CLASS = 3
 #: GeoTIFF tag naming where a severity map came from, and the value of the Sentinel-2 proxy
 #: (``scripts/make_caldor_dnbr.py``).
 SEVERITY_SOURCE_TAG = "TESSERA_APPS_SOURCE"
@@ -209,9 +222,15 @@ SEVERITY_RESOLUTION_CAVEAT = (
     "resampling, so class edges are blocky against the 10 m burned mask and bound the IoU below 1 along every edge."
 )
 SEVERITY_EXCLUDED_CAVEAT = (
-    "Pixels in class 0 (background or outside the map) and 6 (non-processing) are excluded from every severity "
-    "score and counted under excluded. Increased greenness (class 5) is never a burned class: it is scored as "
-    "unburned land in the binary scores and has its own detection rate."
+    "Pixels the severity map does not cover (outside its extent or on its nodata) and class 6 (non-processing) "
+    "are excluded from every severity score and counted under excluded. Background (class 0, outside the mapped "
+    "burn) and increased greenness (class 5) are never burned classes: they are scored as unburned land in the "
+    "binary scores, so detections there count as false positives, and each has its own detection rate."
+)
+SEVERITY_NODATA_ZERO_CAVEAT = (
+    "The severity file declares 0 as its nodata, so its background cannot be told apart from pixels it does not "
+    "map: background pixels are excluded as unmapped, and detections outside the mapped burn do not count "
+    "against precision or IoU."
 )
 SEVERITY_PROXY_CAVEAT = (
     "The severity map carries TESSERA_APPS_SOURCE=sentinel2_dnbr: it is the Sentinel-2 dNBR proxy written by "
@@ -644,9 +663,9 @@ def score_against_reference(
 def severity_burned(severity: np.ndarray, min_class: int) -> np.ndarray:
     """Pixels of an MTBS dnbr6 map counted as burned: class ``min_class`` to 4 (high).
 
-    The codes are ordinal from 1 (unburned to low) to 4 (high) only: 5 (increased greenness) is
-    unburned land and 6 (non-processing) and 0 (background) are not mapped, so ``class >= min_class``
-    stops at 4.
+    The codes are ordinal from 1 (unburned to low) to 4 (high) only: 0 (background, outside the
+    mapped burn) and 5 (increased greenness) are unburned land, 6 (non-processing) is not mapped and
+    :data:`SEVERITY_UNMAPPED` is not covered, so ``class >= min_class`` stops at 4.
     """
     s = np.asarray(severity)
     return (s >= min_class) & (s <= SEVERITY_HIGH)
@@ -665,19 +684,21 @@ def load_severity(plan: io.AOIPlan, path: Path | str) -> tuple[dict[str, np.ndar
     """A burn severity GeoTIFF in MTBS dnbr6 codes, read onto every zone plan with nearest resampling.
 
     Any CRS: only the window around each plan is read and reprojected
-    (:func:`validate._raster_on_plan`). Pixels outside the raster, on its nodata or outside the AOI
-    are 0 (background). The file is refused, naming it, when it cannot be read, when a value inside
-    the plan windows is not one of the codes 0 to 6, when it does not overlap the AOI, or when no AOI
-    pixel holds a class from 1 to 5.
+    (:func:`validate._raster_on_plan`). AOI pixels the raster covers keep their code, 0
+    (background) included; pixels outside the raster, on its nodata or outside the AOI are
+    :data:`SEVERITY_UNMAPPED`. The file is refused, naming it, when it cannot be read, when a value
+    it holds over the AOI is not one of the codes 0 to 6 (values between the AOI polygon and its
+    bounding window are never used, so they are not checked), when it does not overlap the AOI, or
+    when no AOI pixel holds a class from 1 to 5.
 
     Args:
         plan: The AOI plan.
         path: The GeoTIFF (band 1).
 
     Returns:
-        ``(classes, info)``: uint8 codes per zone, and a record of the file (name, sha256, the
-        ``TESSERA_APPS_*`` tags, ``source_tag`` and ``proxy``, true when the tag
-        ``TESSERA_APPS_SOURCE`` is ``sentinel2_dnbr``).
+        ``(classes, info)``: uint8 codes per zone, and a record of the file (name, sha256, CRS,
+        resolution, ``nodata``, the ``TESSERA_APPS_*`` tags, ``source_tag`` and ``proxy``, true
+        when the tag ``TESSERA_APPS_SOURCE`` is ``sentinel2_dnbr``).
 
     Raises:
         AppInputError: The file cannot be used, with a message that names it.
@@ -690,13 +711,15 @@ def load_severity(plan: io.AOIPlan, path: Path | str) -> tuple[dict[str, np.ndar
             tags = {str(k): str(v) for k, v in ds.tags().items()}
             crs = None if ds.crs is None else ds.crs.to_string()
             res = [float(abs(r)) for r in ds.res]
+            nodata = None if ds.nodata is None or math.isnan(ds.nodata) else float(ds.nodata)
         for z in plan.zones:
             raw[z.zone] = validate._raster_on_plan(src, z)
     except (OSError, ValueError, RuntimeError, rasterio.errors.RasterioError) as exc:
         raise AppInputError(f"Could not read the severity file {src}: {exc}. {hint}") from exc
     bad: set[float] = set()
-    for values, covered in raw.values():
-        v = values[covered]
+    for z in plan.zones:
+        values, covered = raw[z.zone]
+        v = values[covered & z.mask]
         wrong = ~np.isin(v, SEVERITY_CODES)
         if wrong.any():
             bad.update(float(x) for x in np.unique(v[wrong])[:5])
@@ -704,9 +727,12 @@ def load_severity(plan: io.AOIPlan, path: Path | str) -> tuple[dict[str, np.ndar
         shown = ", ".join(f"{x:g}" for x in sorted(bad)[:5])
         raise AppInputError(
             f"The severity file {src} holds values outside the MTBS dnbr6 codes 0 to 6 ({shown}) over the AOI; it may "
-            f"be a continuous dNBR rather than its classes. {hint}"
+            f"be a continuous dNBR rather than its classes, or a fill value its nodata tag does not declare. {hint}"
         )
-    classes = {z.zone: np.where(raw[z.zone][1] & z.mask, raw[z.zone][0], 0).astype(np.uint8) for z in plan.zones}
+    classes = {
+        z.zone: np.where(raw[z.zone][1] & z.mask, raw[z.zone][0], SEVERITY_UNMAPPED).astype(np.uint8)
+        for z in plan.zones
+    }
     overlap = sum(int((raw[z.zone][1] & z.mask).sum()) for z in plan.zones)
     if overlap == 0:
         raise AppInputError(f"The severity file {src} does not overlap the AOI. {hint}")
@@ -722,6 +748,7 @@ def load_severity(plan: io.AOIPlan, path: Path | str) -> tuple[dict[str, np.ndar
         "sha256": export.file_sha256(src),
         "crs": crs,
         "resolution": res,
+        "nodata": nodata,
         "source_tag": source,
         "proxy": source == SEVERITY_PROXY_SOURCE,
         "tags": {k: v for k, v in sorted(tags.items()) if k.startswith("TESSERA_APPS_")},
@@ -740,53 +767,64 @@ def score_against_severity(
 ) -> dict[str, Any]:
     """Score the burned mask against a burn severity map, over classified AOI pixels of every zone.
 
-    Classified AOI pixels in classes 1 to 5 are scored; those in 0 (background or outside the map)
-    and 6 (non-processing) are left out and counted. The binary scores take burned as class
-    ``min_class`` to 4 (:func:`severity_burned`), and also class 2 to 4 (low or worse); increased
-    greenness (5) is unburned land there. Zones are merged with :func:`validate.merge_scores`.
+    Classified AOI pixels the map covers in classes 0 to 5 are scored; those it does not cover
+    (:data:`SEVERITY_UNMAPPED`: outside its extent or on its nodata) and those in class 6
+    (non-processing) are left out and counted. The binary scores take burned as class
+    ``min_class`` to 4 (:func:`severity_burned`), and also class 3 to 4 (moderate or worse, which
+    the stop rule reads whatever ``min_class`` is) and class 2 to 4 (low or worse). Background (0,
+    outside the mapped burn) and increased greenness (5) are unburned land there, so detections in
+    them count as false positives. Zones are merged with :func:`validate.merge_scores`.
 
     Args:
         plan: The AOI plan.
         burned: The app's burned mask per zone.
-        severity: dnbr6 codes per zone (:func:`load_severity`).
+        severity: dnbr6 codes per zone, :data:`SEVERITY_UNMAPPED` where the map has no data
+            (:func:`load_severity`).
         classified: Pixels the app classified per zone.
         min_class: Lowest class counted as burned, 1 to 4.
 
     Returns:
-        ``min_class`` and its name; ``classes``: per class 1 to 5 the classified ``pixels`` and
+        ``min_class`` and its name; ``classes``: per class 0 to 5 the classified ``pixels`` and
         ``hectares``, the ``detected_pixels`` and ``detected_hectares`` the app called burned and
-        their share, ``detection_rate``; ``min_class_or_worse`` and ``low_or_worse``
-        (:class:`validate.BinaryScores` merged over zones) with ``per_zone`` scores of each;
-        ``detections_by_class``: for every code 0 to 6 the ``pixels`` and ``share`` of the app's
-        burned pixels in it; ``excluded``: classified pixels in class 0 (``background_pixels``) and
-        6 (``non_processing_pixels``); ``unclassified_pixels_in_classes_1_to_5``; ``pixels_scored``
-        and ``iou_below_0_6`` (of ``min_class_or_worse``).
+        their share, ``detection_rate``; ``min_class_or_worse``, ``moderate_or_worse`` and
+        ``low_or_worse`` (:class:`validate.BinaryScores` merged over zones) with ``per_zone``
+        scores of each; ``detections_by_class``: for every code 0 to 6, and ``unmapped``, the
+        ``pixels`` and ``share`` of the app's burned pixels in it; ``excluded``: classified pixels
+        the map does not cover (``unmapped_pixels``) and in class 6 (``non_processing_pixels``);
+        ``unclassified_pixels_in_classes_1_to_5``; ``pixels_scored``; ``stop_rule_min_class`` and
+        ``iou_below_0_6`` (of ``moderate_or_worse``, the IoU the stop rule reads).
 
     Raises:
         AppInputError: ``min_class`` is not 1 to 4.
     """
     k = _check_min_class(min_class)
-    per_min: dict[str, validate.BinaryScores] = {}
-    per_low: dict[str, validate.BinaryScores] = {}
+    bases = {"min_class_or_worse": k, "moderate_or_worse": SEVERITY_STOP_CLASS, "low_or_worse": SEVERITY_LOW}
+    per: dict[int, dict[str, validate.BinaryScores]] = {c: {} for c in sorted(set(bases.values()))}
     n_codes = len(SEVERITY_CODES)
     class_px = np.zeros(n_codes, dtype=np.int64)
     burned_by_class = np.zeros(n_codes, dtype=np.int64)
     unclassified = np.zeros(n_codes, dtype=np.int64)
+    unmapped_px = unmapped_burned = 0
     for z in plan.zones:
-        s = np.where(z.mask, np.asarray(severity[z.zone]), 0).astype(np.int64)
-        if s.size and (s.min() < 0 or s.max() >= n_codes):
-            raise ValueError(f"Severity codes for {z.zone} must lie in 0 to {n_codes - 1}.")
+        s = np.where(z.mask, np.asarray(severity[z.zone]), SEVERITY_UNMAPPED).astype(np.int64)
+        mapped = s != SEVERITY_UNMAPPED
+        if ((s < 0) | (mapped & (s >= n_codes))).any():
+            raise ValueError(
+                f"Severity codes for {z.zone} must lie in 0 to {n_codes - 1}, or be {SEVERITY_UNMAPPED} where unmapped."
+            )
         v = np.asarray(classified[z.zone], dtype=bool) & z.mask
         b = np.asarray(burned[z.zone], dtype=bool) & v
-        scored = v & (s >= 1) & (s <= SEVERITY_GREENER)
-        per_min[z.zone] = validate.binary_scores(b, severity_burned(s, k), valid=scored)
-        per_low[z.zone] = validate.binary_scores(b, severity_burned(s, SEVERITY_LOW), valid=scored)
-        class_px += np.bincount(s[v], minlength=n_codes)
-        burned_by_class += np.bincount(s[b], minlength=n_codes)
-        unclassified += np.bincount(s[z.mask & ~v], minlength=n_codes)
-    merged = validate.merge_scores(list(per_min.values()))
-    low = validate.merge_scores(list(per_low.values()))
-    n_burned = int(burned_by_class.sum())
+        scored = v & mapped & (s <= SEVERITY_GREENER)
+        for c, parts in per.items():
+            parts[z.zone] = validate.binary_scores(b, severity_burned(s, c), valid=scored)
+        class_px += np.bincount(s[v & mapped], minlength=n_codes)
+        burned_by_class += np.bincount(s[b & mapped], minlength=n_codes)
+        unclassified += np.bincount(s[z.mask & ~v & mapped], minlength=n_codes)
+        unmapped_px += int((v & ~mapped).sum())
+        unmapped_burned += int((b & ~mapped).sum())
+    merged = {name: validate.merge_scores(list(per[c].values())) for name, c in bases.items()}
+    stop: validate.BinaryScores = merged["moderate_or_worse"]
+    n_burned = int(burned_by_class.sum()) + unmapped_burned
     classes = {}
     for c in SEVERITY_SCORED:
         px, hit = int(class_px[c]), int(burned_by_class[c])
@@ -798,43 +836,47 @@ def score_against_severity(
             "detected_hectares": hit * HA_PER_PIXEL,
             "detection_rate": hit / px if px else None,
         }
+    where = {str(c): int(burned_by_class[c]) for c in SEVERITY_CODES}
+    where["unmapped"] = unmapped_burned
     return {
         "min_class": k,
         "min_class_name": SEVERITY_NAMES[k],
         "classes": classes,
-        "min_class_or_worse": merged,
-        "low_or_worse": low,
-        "per_zone": {"min_class_or_worse": per_min, "low_or_worse": per_low},
+        **merged,
+        "per_zone": {name: dict(per[c]) for name, c in bases.items()},
         "detections_by_class": {
-            str(c): {
-                "pixels": int(burned_by_class[c]),
-                "share": int(burned_by_class[c]) / n_burned if n_burned else None,
-            }
-            for c in SEVERITY_CODES
+            c: {"pixels": n, "share": n / n_burned if n_burned else None} for c, n in where.items()
         },
         "burned_pixels": n_burned,
         "excluded": {
-            "background_pixels": int(class_px[SEVERITY_BACKGROUND]),
+            "unmapped_pixels": unmapped_px,
             "non_processing_pixels": int(class_px[SEVERITY_NON_PROCESSING]),
         },
         "unclassified_pixels_in_classes_1_to_5": int(unclassified[1 : SEVERITY_GREENER + 1].sum()),
-        "pixels_scored": merged.n,
-        "iou_below_0_6": merged.iou is not None and merged.iou < IOU_STOP,
+        "pixels_scored": merged["min_class_or_worse"].n,
+        "stop_rule_min_class": SEVERITY_STOP_CLASS,
+        "iou_below_0_6": stop.iou is not None and stop.iou < IOU_STOP,
     }
 
 
 def _severity_caveats(info: Mapping[str, Any], scores: Mapping[str, Any]) -> list[str]:
     out = [SEVERITY_THRESHOLD_CAVEAT, SEVERITY_RESOLUTION_CAVEAT, SEVERITY_EXCLUDED_CAVEAT]
     out.append(f"Severity reference: the file {info['file']} (sha256 {info['sha256']}), supplied with --severity.")
+    if info.get("nodata") == 0:
+        out.append(SEVERITY_NODATA_ZERO_CAVEAT)
     if info.get("proxy"):
         out.append(SEVERITY_PROXY_CAVEAT)
     if scores.get("iou_below_0_6"):
         out.append(
-            f"IoU against severity class {scores['min_class']} ({scores['min_class_name']}) or worse is below "
-            f"{IOU_STOP}, the brief's stop-and-report level: read it with the per-class detection and the caveats "
-            "above rather than tuning the threshold to the reference."
+            f"IoU against severity class {SEVERITY_STOP_CLASS} ({SEVERITY_NAMES[SEVERITY_STOP_CLASS]}) or worse is "
+            f"below {IOU_STOP}, the brief's stop-and-report level: read it with the per-class detection and the "
+            "caveats above rather than tuning the threshold to the reference."
         )
     return out
+
+
+def _scores_record(scores: validate.BinaryScores) -> dict[str, float | None]:
+    return {"iou": scores.iou, "precision": scores.precision, "recall": scores.recall, "f1": scores.f1}
 
 
 def _severity_summary(
@@ -843,9 +885,12 @@ def _severity_summary(
     severity: Mapping[str, np.ndarray],
     reference_mask: Mapping[str, np.ndarray],
 ) -> dict[str, Any]:
-    """The summary's compact view of :func:`score_against_severity`."""
+    """The summary's compact view of :func:`score_against_severity`.
+
+    ``iou`` and its neighbours are the scores against ``min_class`` or worse; ``moderate_or_worse``
+    holds the scores the stop rule reads, and ``iou_below_0_6`` is its verdict.
+    """
     merged: validate.BinaryScores = scores["min_class_or_worse"]
-    low: validate.BinaryScores = scores["low_or_worse"]
     k = int(scores["min_class"])
     n_ref = sum(int(m.sum()) for m in reference_mask.values())
     n_ref_burned = sum(int((reference_mask[z] & severity_burned(severity[z], k)).sum()) for z in reference_mask)
@@ -855,13 +900,11 @@ def _severity_summary(
         "source_tag": info.get("source_tag"),
         "min_class": k,
         "min_class_name": scores["min_class_name"],
-        "iou": merged.iou,
-        "precision": merged.precision,
-        "recall": merged.recall,
-        "f1": merged.f1,
+        **_scores_record(merged),
         "pixels_scored": merged.n,
         "iou_below_0_6": scores["iou_below_0_6"],
-        "low_or_worse": {"iou": low.iou, "precision": low.precision, "recall": low.recall, "f1": low.f1},
+        "moderate_or_worse": _scores_record(scores["moderate_or_worse"]),
+        "low_or_worse": _scores_record(scores["low_or_worse"]),
         "detection_rate_by_class": {c: row["detection_rate"] for c, row in scores["classes"].items()},
         "detections_by_class": {c: row["share"] for c, row in scores["detections_by_class"].items()},
         "excluded": dict(scores["excluded"]),
@@ -873,19 +916,22 @@ def _severity_summary(
 def stop_rule(validation: Mapping[str, Any]) -> dict[str, Any] | None:
     """The brief's IoU 0.6 stop rule (section 8), as the survey and the owner's decision amended it.
 
-    With a severity map, it applies to the IoU against its ``min_class`` or worse; otherwise to the
-    outline IoU, read together with recall inside the reference.
+    With a severity map, it applies to the IoU against moderate or worse
+    (:data:`SEVERITY_STOP_CLASS`), whatever ``--severity-min-class`` is, so the verdict cannot be
+    moved by choosing the class; otherwise to the outline IoU, read together with recall inside the
+    reference.
 
     Returns:
-        ``basis`` (``"severity"`` or ``"reference"``), ``iou``, ``below_0_6``, and for the outline
-        ``recall_inside_reference``; None when nothing was scored.
+        ``basis`` (``"severity"`` or ``"reference"``), ``iou``, ``below_0_6``, for the severity map
+        ``min_class`` (always 3) and for the outline ``recall_inside_reference``; None when nothing
+        was scored.
     """
     sev = validation.get("severity")
     if isinstance(sev, Mapping):
-        iou = sev.get("iou")
+        iou = (sev.get("moderate_or_worse") or {}).get("iou")
         return {
             "basis": "severity",
-            "min_class": sev.get("min_class"),
+            "min_class": SEVERITY_STOP_CLASS,
             "iou": iou,
             "below_0_6": iou is not None and iou < IOU_STOP,
         }
@@ -911,7 +957,8 @@ def _num(value: float | None) -> str:
 def headline(validation: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """The validation headline, in the order the owner set: severity first, then the outline.
 
-    With a severity map: its IoU against ``min_class`` or worse and the detection rate per class
+    With a severity map: its IoU against ``min_class`` or worse (and, when ``min_class`` is not 3,
+    the IoU against moderate or worse that the stop rule reads) and the detection rate per class
     (high first), then, when an outline reference was scored, recall inside it and its IoU. Without
     one: recall inside the reference, then IoU.
 
@@ -933,9 +980,13 @@ def headline(validation: Mapping[str, Any] | None) -> dict[str, Any] | None:
         out["detection_rate_by_class"] = dict(rates)
         order += ["severity_iou", "detection_rate_by_class"]
         what = "Sentinel-2 dNBR proxy" if sev.get("proxy") else "severity map"
+        stop = ""
+        if sev.get("min_class") != SEVERITY_STOP_CLASS:
+            stop_iou = (sev.get("moderate_or_worse") or {}).get("iou")
+            stop = f" (the stop rule reads IoU {_num(stop_iou)} against moderate or worse)"
         detected = ", ".join(f"{SEVERITY_NAMES[c]} {_pct(rates.get(str(c)))}" for c in SEVERITY_HEADLINE_ORDER)
         parts.append(
-            f"Severity ({what}): IoU {_num(sev.get('iou'))} against {sev.get('min_class_name')} or worse; "
+            f"Severity ({what}): IoU {_num(sev.get('iou'))} against {sev.get('min_class_name')} or worse{stop}; "
             f"detected {detected}"
         )
     if "iou" in validation:
@@ -1101,7 +1152,8 @@ def _validate(
     something was scored; the report vouches for it (the second value) only when every requested
     reference was scored, so when the outline could not be loaded the severity scores are still
     written and a rerun redoes the validation. The stop rule (:func:`stop_rule`) warns on the
-    severity IoU when a severity map was given, else on the outline IoU.
+    severity IoU against moderate or worse when a severity map was given, else on the outline IoU;
+    the warning ends with :data:`STOP_WARNING`.
 
     Returns:
         The summary's validation block, and whether the report vouches for ``validation.json``.
@@ -1158,15 +1210,14 @@ def _validate(
     validation["stop_rule"] = rule
     if rule is not None and rule["below_0_6"]:
         if rule["basis"] == "severity":
-            sev = validation["severity"]
             ctx.warn(
-                f"IoU {rule['iou']:.3f} against severity class {sev['min_class']} ({sev['min_class_name']}) or worse "
-                f"is below {IOU_STOP}: stop and report (brief section 8)."
+                f"IoU {rule['iou']:.3f} against severity class {rule['min_class']} "
+                f"({SEVERITY_NAMES[rule['min_class']]}) or worse is below {IOU_STOP}: {STOP_WARNING}"
             )
         else:
             ctx.warn(
                 f"IoU {rule['iou']:.3f} is below {IOU_STOP} (recall inside the reference "
-                f"{_num(rule['recall_inside_reference'])}): stop and report (brief section 8)."
+                f"{_num(rule['recall_inside_reference'])}): {STOP_WARNING}"
             )
     return validation, complete
 
@@ -1671,9 +1722,14 @@ def run_wildfire(
     With ``severity`` (an MTBS dnbr6 GeoTIFF, or the Sentinel-2 proxy of
     ``scripts/make_caldor_dnbr.py``), ``validation.json`` gets a ``severity`` block
     (:func:`score_against_severity`) next to the outline scores, whether or not ``validate`` asks for
-    the outline too, and the stop rule reads the IoU against ``severity_min_class`` or worse. When
-    the outline reference cannot be loaded, the severity scores are still written, and the report
-    does not vouch for the file, so a rerun tries the outline again.
+    the outline too, and the stop rule reads the IoU against moderate or worse, whatever
+    ``severity_min_class`` is. When the outline reference cannot be loaded, the severity scores are
+    still written, and the report does not vouch for the file, so a rerun tries the outline again.
+    Whether the outline was asked for is not in the arguments digest (adding ``validate`` must not
+    re-read the store), so a ``validate`` rerun of a run whose ``validation.json`` has no outline
+    scores (it had only ``severity``) redoes the validation from the outputs on disk too
+    (:func:`_withdraw_validation`); when the outline still cannot be loaded, the report is put
+    back as it was.
 
     Args:
         aoi: AOI file (any CRS), demo name (``caldor``) or a loaded AOI. Make it extend past the
@@ -1767,51 +1823,67 @@ def run_wildfire(
     }
     state = _Reference()
     years_per_block = 1 + len(recovery_years) + (1 if fallback_year is not None else 0)
-    try:
-        ctx = prepare_run(
-            APP,
-            loaded,
-            years_read,
-            year_a,
-            year_b,
-            out,
-            params,
-            validate=validate or sev_path is not None,
-            force=force,
-            max_area_km2=max_area_km2,
-            max_zones=max_zones,
-            snapshot_id=snapshot_id,
-            reader=reader,
-            seed=SEED,
-            block=block,
-            extra_outputs=extras,
-            # The main pass reads year_a and every recovery year; the PCA pass may read year_a once
-            # more; the fallback reads year_a - 1 and year_a (and covers the pre-fire sample).
-            year_reads=1 + len(recovery_years) + 1 + (2 if fallback_year is not None else 0),
-            code_modules=(sys.modules[__name__],),
-            memory_estimate=lambda plan: memory_estimate(
-                plan, n_recovery_years=len(recovery_years), years_per_block=years_per_block, block=block
-            ),
-            allow_validation_only=True,
-            preflight=lambda c: _load_reference(
-                c,
-                state,
-                reference=ref_path,
-                fire_year=fire,
-                fire_name=fire_name,
-                strict=strict_validate and validate,
-                outline=validate,
-                severity=sev_path,
-                severity_min_class=severity_min_class,
-            ),
-        )
-    except io.YearsNotPublishedError as exc:
-        if fallback_year is not None and any(fallback_year in years for years in exc.missing.values()):
-            exc.add_note(
-                f"Year {fallback_year} (year_a - 1) is read only for the stable-pair threshold fallback and the "
-                "recovery reference check; pass --threshold to run without it."
+
+    def prepare() -> RunContext | None:
+        try:
+            return prepare_run(
+                APP,
+                loaded,
+                years_read,
+                year_a,
+                year_b,
+                out,
+                params,
+                validate=validate or sev_path is not None,
+                force=force,
+                max_area_km2=max_area_km2,
+                max_zones=max_zones,
+                snapshot_id=snapshot_id,
+                reader=reader,
+                seed=SEED,
+                block=block,
+                extra_outputs=extras,
+                # The main pass reads year_a and every recovery year; the PCA pass may read year_a once
+                # more; the fallback reads year_a - 1 and year_a (and covers the pre-fire sample).
+                year_reads=1 + len(recovery_years) + 1 + (2 if fallback_year is not None else 0),
+                code_modules=(sys.modules[__name__],),
+                memory_estimate=lambda plan: memory_estimate(
+                    plan, n_recovery_years=len(recovery_years), years_per_block=years_per_block, block=block
+                ),
+                allow_validation_only=True,
+                preflight=lambda c: _load_reference(
+                    c,
+                    state,
+                    reference=ref_path,
+                    fire_year=fire,
+                    fire_name=fire_name,
+                    strict=strict_validate and validate,
+                    outline=validate,
+                    severity=sev_path,
+                    severity_min_class=severity_min_class,
+                ),
             )
-        raise
+        except io.YearsNotPublishedError as exc:
+            if fallback_year is not None and any(fallback_year in years for years in exc.missing.values()):
+                exc.add_note(
+                    f"Year {fallback_year} (year_a - 1) is read only for the stable-pair threshold fallback and the "
+                    "recovery reference check; pass --threshold to run without it."
+                )
+            raise
+
+    ctx = prepare()
+    # The outputs are current, but the validation.json the report vouches for may hold no outline
+    # scores (the earlier run had only --severity): stop vouching for it and prepare again, which
+    # then takes the validation-only path. The report is put back when nothing is redone.
+    vouched = _withdraw_validation(paths.report) if ctx is None and validate else None
+    if vouched is not None:
+        try:
+            ctx = prepare()
+        except BaseException:
+            _restore_report(paths.report, vouched)
+            raise
+        if ctx is None:
+            _restore_report(paths.report, vouched)
     if ctx is None:
         report = json.loads(paths.report.read_text(encoding="utf-8"))
         return WildfireResult(
@@ -1822,7 +1894,18 @@ def run_wildfire(
             validation_written="validation" in (report.get("outputs") or {}),
         )
     if ctx.validation_only:
-        return _redo_validation(ctx, state)
+        try:
+            result = _redo_validation(ctx, state)
+        except BaseException:
+            if vouched is not None:
+                _restore_report(paths.report, vouched)
+            raise
+        if vouched is not None and not result.validation_redone:
+            # The outline still cannot be loaded: the earlier run's report stands, and the outline
+            # this run asked for was not written.
+            _restore_report(paths.report, vouched)
+            result = dataclasses.replace(result, report=json.loads(vouched), validation_written=False)
+        return result
     return _run(
         ctx,
         recovery_years=recovery_years,
@@ -1835,12 +1918,57 @@ def run_wildfire(
     )
 
 
+def _withdraw_validation(report_path: Path) -> str | None:
+    """Make a current report stop vouching for a ``validation.json`` that has no outline scores.
+
+    A run with ``--severity`` and no ``--validate`` writes ``validation.json`` with the severity
+    block only, and its report vouches for it. Whether the outline was asked for is not in the
+    arguments digest, so :func:`export.outputs_current` takes those outputs as current for a later
+    ``--validate`` run with the same other arguments, which would then skip without scoring the
+    outline. Dropping ``validation`` from the report's ``outputs`` (atomically) sends that run down
+    :func:`prepare_run`'s validation-only path instead: the validation is redone from the outputs
+    on disk, without reading a chunk.
+
+    Args:
+        report_path: The report of outputs :func:`prepare_run` found current.
+
+    Returns:
+        The report's previous text when it was rewritten (to put back with :func:`_restore_report`
+        when nothing is redone), None when its validation already has outline scores (``iou``) or
+        it vouches for no validation.
+    """
+    text = report_path.read_text(encoding="utf-8")
+    report = json.loads(text)
+    outputs = dict(report.get("outputs") or {})
+    validation = (report.get("summary") or {}).get("validation") or {}
+    if "validation" not in outputs or "iou" in validation:
+        return None
+    outputs.pop("validation")
+    report["outputs"] = outputs
+    export.write_json(report_path, report)
+    logger.info(
+        "%s: %s vouches for a validation without outline scores, which --validate asks for; the validation is "
+        "redone from the outputs on disk.",
+        APP,
+        report_path,
+    )
+    return text
+
+
+def _restore_report(report_path: Path, text: str) -> None:
+    """Put back a report :func:`_withdraw_validation` rewrote, atomically."""
+    with export.atomic_path(report_path) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+
+
 def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
     """Redo only the validation of a run whose other outputs are current, without reading a chunk.
 
     The burned and classified masks and the distances come back from the run's GeoTIFF
     (:func:`zone_values_from_raster`). When the outline reference still cannot be loaded, nothing is
-    written and the run counts as skipped (a severity block written by the earlier run stays).
+    written and the run counts as skipped (a severity block written by the earlier run stays). The
+    earlier run's validation warnings (:data:`VALIDATION_SKIPPED`, the stop rule's) are replaced by
+    this validation's; its other warnings stay.
     """
     previous = json.loads(ctx.paths.report.read_text(encoding="utf-8"))
     if state.outline and state.masks is None:
@@ -1871,7 +1999,12 @@ def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
     )
     summary["validation"] = validation
     summary["headline"] = headline(validation)
-    old = [w for w in previous.get("warnings") or [] if not str(w).startswith(VALIDATION_SKIPPED)]
+    # The validation's own warnings are rebuilt by _validate; every other warning of the run stays.
+    old = [
+        w
+        for w in previous.get("warnings") or []
+        if not (str(w).startswith(VALIDATION_SKIPPED) or str(w).endswith(STOP_WARNING))
+    ]
     report = finish_validation_only(
         ctx, previous, summary=summary, warnings=[*old, *ctx.warnings], validation_written=written
     )

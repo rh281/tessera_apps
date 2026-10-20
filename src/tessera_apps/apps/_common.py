@@ -102,6 +102,8 @@ class LoadedAOI:
         properties: Properties of the AOI feature (a demo's ``aoi`` feature, or a file's only
             feature); empty when the file holds several AOI features.
         demo: The bundled demo's name when the AOI is a demo, else None.
+        demo_role: The ``role`` of the demo feature loaded, when it is not the demo's AOI (the
+            restore app's ``--aoi itapebi:negative``, or its ``--target demo``), else None.
     """
 
     geometry: BaseGeometry
@@ -110,12 +112,13 @@ class LoadedAOI:
     name: str
     properties: dict[str, Any]
     demo: str | None = None
+    demo_role: str | None = None
 
     @property
     def source(self) -> str:
-        """Where the AOI came from: the file path, or ``demo:<name>``."""
+        """Where the AOI came from: the file path, ``demo:<name>`` or ``demo:<name>:<role>``."""
         if self.demo is not None:
-            return f"demo:{self.demo}"
+            return f"demo:{self.demo}" if self.demo_role is None else f"demo:{self.demo}:{self.demo_role}"
         return str(self.path) if self.path is not None else self.name
 
     @property
@@ -189,8 +192,10 @@ def load_aoi(spec: str | Path | LoadedAOI) -> LoadedAOI:
     A file that declares no CRS is taken as lon/lat when its coordinates fit, and refused otherwise.
     When the file has a ``role`` column and some feature has ``role == "aoi"`` (the bundled demo
     FeatureCollections), only those features count. A bundled demo name (``caldor``, ``rondonia``,
-    ``everglades``, any case) loads that demo unless a regular file of that name exists: a directory
-    of that name (for example an earlier ``--out caldor``) does not hide the demo.
+    ``everglades``, ``itapebi``, ``jaru``, any case; :data:`tessera_apps.demo.DEMO_NAMES`) loads that
+    demo's AOI feature unless a regular file of that name exists: a directory of that name (for
+    example an earlier ``--out caldor``) does not hide the demo. ``<demo>:<role>`` (another feature
+    of a demo) is the restore app's alone, so here it is refused with a message that says so.
 
     Args:
         spec: Path, demo name, or an already loaded AOI (returned as is).
@@ -208,6 +213,13 @@ def load_aoi(spec: str | Path | LoadedAOI) -> LoadedAOI:
     path = Path(text).expanduser()
     if text.lower() in demo.DEMO_NAMES and not path.is_file():
         return _load_demo(text.lower())
+    name, colon, role = text.partition(":")
+    if colon and name.strip().lower() in demo.DEMO_NAMES and not path.exists():
+        raise AppInputError(
+            f"AOI {text!r} names the {role.strip()!r} feature of the bundled demo {name.strip().lower()!r}; only the "
+            f"restore app takes <demo>:<role> (restore --aoi {text}). Pass {name.strip().lower()!r} for the demo's "
+            "AOI, or a GeoJSON, GeoPackage or shapefile path."
+        )
     if not path.exists():
         raise AppInputError(
             f"AOI {text!r} is neither an existing file nor a bundled demo ({', '.join(demo.DEMO_NAMES)}). "
@@ -658,6 +670,7 @@ def finish_run(
     summary: Mapping[str, Any],
     extra: Mapping[str, Path],
     validation_written: bool,
+    aoi_record: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write ``<app>_report.json``, after every other output, and return it.
 
@@ -673,6 +686,9 @@ def finish_run(
         summary: The app's results, plain values.
         extra: Extra output files this run wrote, by name (also listed in ``ctx.extra_outputs``).
         validation_written: Whether this run wrote ``validation.json``.
+        aoi_record: Values that replace or join the report's ``aoi`` block, for an app whose planned
+            extent is wider than its AOI (restore plans the site plus its control); by default the
+            block's area, pixels and zones are the plan's.
 
     Returns:
         The report as plain JSON values.
@@ -694,6 +710,7 @@ def finish_run(
             "area_ha": ctx.plan.area_ha,
             "pixels": ctx.plan.n_pixels,
             "zones": ctx.plan.zone_names,
+            **dict(aoi_record or {}),
         },
         "summary": dict(summary),
         "params": ctx.params,

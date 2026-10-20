@@ -490,3 +490,154 @@ Notable fixes:
 2. **Section 4.3, the method.** Default to cosine distance, with a held-out threshold (survey B6). The brief's Mahalanobis on 12 seed points is not defined.
 3. **Section 4.3, the change step.** Report its own noise: run an adjacent-year pair alongside, and split gain and loss into speckle and coherent patches.
 
+
+## Checkpoint 6: the restore app (2026-10-20)
+
+### Built
+
+- **`apps/restore.py`**, the brief's section 4.4 as corrected by the survey (B5, S16, S17) and by this checkpoint's review:
+  - **Control.** A ring 1 to 3 km around the site, filtered to pixels whose embedding is within the site's own spread. The cut is the 5th percentile of the site pixels' cosine similarity to the site mean, held out by 200 m spatial folds (S17). The filter runs on the **match year**, the year before the baseline, so it never selects on the baseline's own noise (see "What the review caught"). A `--control` polygon replaces the ring and gets a balance report instead. `--match-year` overrides the year.
+  - **Panel and radar.** A pixel is used only if it has data in every year from the baseline to `year_b`, and only if its radar pattern matches the site's majority pattern (B5). Every within-year comparison is between pixels of the same regime.
+  - **Divergence.** Cosine distance between the site's and the control's mean embeddings, every year from the year before planting to 2025, and its change since the baseline.
+  - **Placebos.** 200 placebo sites, each the control pixels within the site's own footprint around a random control pixel. Their divergence change per year gives a 5 to 95 percentile band. A year is significant when the site's change is above both the 95th percentile and zero.
+  - **Verdict.** "diverging from control since YYYY" (every year from YYYY to `year_b` significant, at least two of them), "no divergence detected", or "insufficient years" (fewer than 3 post-planting years). The same rule on the placebos gives a false positive rate.
+  - **Target and per-pixel shares.** With `--target`, progress toward the mature stand, from 0 (the control) to 1 (the target's two contiguous halves). Two per-pixel shares: site pixels closer to the target than to the control, and site pixels outside the control's own 5th percentile ("departed").
+  - **Null test, the brief's validation.** The control split into two halves (sectors for the ring, the long axis for a supplied control), run through the same verdict.
+  - **Canopy check.** The site's and control's GLAD canopy height per year, compared with the divergence: onset year, the sign of the correlation, and the size.
+  - **Limitation.** No global reference layer exists for restoration outcomes. The report and the notebook both say so plainly.
+- **`validate.py`:** a GLAD annual tree canopy height loader (`glad_tch`, 2015 to 2024). It reads the Hansen bucket's 10 degree tiles through the existing tile machinery.
+- **Demo data:** two synthetic sites, `itapebi` and `jaru`, each with a target and a negative stand (below). `scripts/check_restore_demos.py` recomputes their evidence.
+- **CLI:** `tessera-apps restore --aoi PATH|demo|demo:role --planted YYYY [--target] [--control] [--validate] [--match-year] ...`. The planting year defaults to the demo's.
+- **Framework:** additive changes to `_common`. `finish_run` takes an `aoi_record` so the report describes the site, not the planned extent. `LoadedAOI` gains a `demo_role`. The other apps are unchanged.
+- **Notebook:** `notebooks/04_restore.ipynb`, executed, 1.6 MB.
+- **Tests:** 1,052 offline (up from 885, including the wildfire follow-up below). There is also one new network test, which runs the Itapebi demo live.
+
+### The demo sites are synthetic
+
+The brief asks for a public project polygon with a 2019 or 2020 planting date. Every host that has one is blocked from the build environment: USFS FACTS, Restor, Plant-for-the-Planet and Global Forest Watch. The survey had already dropped the Caldor fallback (S16).
+
+Three search agents instead scanned the Brazilian Amazon, the Atlantic Forest and Cerrado, and Central America. They used the GLAD annual canopy height maps (2015 to 2024, reachable on the Hansen bucket) for sites with no tree of 5 m through 2018 and trees of 5 m or more by 2022, in a ring that stayed open. Each candidate was then checked against Hansen, WorldCover, Sentinel-2 imagery and the store's coverage.
+
+- **`itapebi`.** A 62 ha straight-edged block in southern Bahia (24S): pasture through 2018, soil prepared in the July 2019 Sentinel-2 scene, canopy 6.4 m in 2021 and 19 m in 2024. It is a eucalyptus plantation, so it stands in for a tree planting, not an ecological restoration. Its 1 to 3 km ring is 84% pasture that stayed pasture.
+- **`jaru`.** A 32 ha fenced paddock in Rondonia (20S), cleared before 2000, regrowing naturally: 7% of it was at 5 m or more in 2019, 63% in 2020 and 91% in 2021. Its "planting year" 2019 is a choice, as the run shows.
+
+Each file also holds a mature forest target and a negative site: a stand of the same pasture that stayed pasture.
+
+### Numbers: the checkpoint answer
+
+All four runs used planted 2019, the years 2018 to 2025, match year 2017, `--target demo --validate`, and store snapshot `RC6FS07ZB0T76EXT8XRG`. Every pixel kept had radar in every year.
+
+| | Itapebi (planting) | Itapebi negative | Jaru (regrowth) | Jaru negative |
+|---|---|---|---|---|
+| Verdict | diverging since 2019 | no divergence | diverging since 2020 | no divergence |
+| Largest divergence change (dD), in size | 0.471 (2021) | 0.017 | 0.064 (2024) | 0.011 |
+| Placebo false positive rate | 2.5% | 5.0% | 1.0% | 2.0% |
+| **Null test** (control halves) | no divergence | no divergence | no divergence | no divergence |
+| Null largest change, and ratio to the site's | 0.010 (0.022) | 0.006 (0.34) | 0.0002 (0.003) | 0.0003 (0.031) |
+| Target progress in 2025 | 0.58 | -0.14 | 0.35 | about -0.1 |
+| Site pixels closer to the target, 2025 | 99% | 0% | 10% | 0% |
+| Canopy onset (GLAD) and Spearman | 2021, 0.75 | none | 2020, 0.96 | none |
+| Control kept, of the ring | 9,331 of 317,171 | 94,250 of 307,139 | 163,863 of 300,075 | 228,442 of 297,130 |
+| Read and wall time | 0.77 GB, 17 s | 0.89 GB, 43 s | 1.03 GB, 27 s | 1.04 GB, 35 s |
+
+**The null test is near zero in all four runs.** The largest null change is at most 2% of the change at the two sites that diverge.
+
+**Itapebi's divergence curve.** `dD` against the placebo band's 95th percentile:
+
+| | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|---|
+| dD | 0.027 | 0.283 | 0.471 | 0.336 | 0.368 | 0.416 | 0.340 |
+| Placebo p95 | 0.019 | 0.002 | 0.063 | 0.043 | 0.012 | 0.026 | 0.018 |
+
+Reading the numbers:
+
+- **The planting diverges from its planting year.** 2019 is just above the band, which fits soil worked in mid-2019. By 2020 `dD` is 0.28, a year before GLAD sees any tree of 5 m (onset 2021). After 2021 it plateaus while the trees grow from 6 to 19 m. The embeddings register a change of land cover, not tree height, so the curve is a step, not the steady rise the brief describes. Its Theil-Sen slope is weak for that reason.
+- **Natural regrowth is a slow, steady rise, about a seventh the size.** Jaru grows from 0.007 to 0.064 (Spearman 0.93) and tracks the canopy gap closely (Pearson 0.97). But its baseline is not clean. Its divergence from the control rose 0.047 between 2017 and 2018, before GLAD saw a tree. That leaves the first three quarters of the change out of `dD`, and the run now warns about it.
+- **"Progress" is not "restored".** The six-year-old monoculture reaches 0.6 of the way to native forest, natural regrowth 0.35. The number measures similarity of canopy, spectra and radar, not ecological value.
+- **The negatives stay quiet.** The Jaru negative has one significant year (2021), which the run rule correctly refuses to call. The Itapebi negative's ring holds a neighbouring eucalyptus compartment planted in 2019 to 2020. Its placebos widen the band (p95 up to 0.135). That makes the test conservative there, and the false positive rate cannot show it.
+- **2017 is thin.** Only 43% of the Itapebi ring has 2017 data, so its control (6.8% of those pixels) clusters where 2017 had clear views. The run warns when under half the site or ring has match-year data.
+
+### How it was checked
+
+**Build and review.** One agent built the app; three lenses reviewed it: method, framework and I/O, and test strength with 25 or more mutants on a copy. A skeptic per lens tried to refute each finding with experiments: 29 findings, 27 confirmed (some only in part), 2 refuted. A fix agent applied them and the lead's decisions on the builder's own doubts.
+
+**After the review.**
+1. A follow-up stopped the sparse 2017 match year from shrinking the site and target, and added `--match-year`, the demo roles, the evidence script and the network test.
+2. The live demos and notebook 04 followed.
+3. Three last fixes came out of the demo, after which the notebook was re-executed:
+   - the null caveat now depends on the halves' real size (at Itapebi the smaller half is 0.41 times the site);
+   - a warning fires when the site already differs from its control at the baseline (Jaru);
+   - a correlation under 0.3 reads as having no sign.
+
+What the review caught:
+
+- **Regression to the mean called a quiet site diverging.** The filter and the baseline shared one year. Ring pixels of a similar land cover that passed by the luck of that year's noise drifted back afterwards, and the site appeared to diverge. Neither the placebos nor the null test could see it, because both were drawn from the filtered pool. A designed store gave "diverging since 2020" for a site that did nothing, with a clean null and a 0.5% false positive rate. With the filter moved to the year before the baseline, the result is "no divergence detected".
+- **Placebos smaller than the site moved the band, not just widened it.** A site whose divergence fell could be called diverging. Significance now also requires a change above zero.
+- **Placebos in a sparse pool were spread out, so their band was too narrow.** In a fragmented ring, 27.5% of do-nothing sites were called diverging, against 5% in a dense one. Placebos now take the site's footprint, and the sparse case gives 0 of 40.
+- **The null test could not run for a compact supplied control**, and the run still passed under `--strict-validate`.
+- **The memory estimate was 1.6 to 1.8 times too low.** The canopy check also retried every chunk read forever after a permanent failure.
+
+## Checkpoint 3 follow-up: wildfire scored against burn severity (2026-10-20)
+
+The question left open at checkpoint 3: NIFC perimeters include unburned islands, so the brief's IoU of 0.6 against them is out of reach for a pixel map (at most 0.57 for Caldor). The owner left the choice of reference to the build. MTBS is the right reference for a burned mask, but mtbs.gov and its download host are blocked here. The Sentinel-2 L2A archive on AWS is reachable, though.
+
+- **`--severity PATH`** scores the burned mask against any MTBS-style dnbr6 severity map:
+  - per-class detection, with hectares;
+  - IoU, precision, recall and F1 against moderate or worse, and against low or worse;
+  - where the detections fall by class.
+  The brief's stop rule now reads the IoU against moderate or worse. NIFC stays the automatic US reference, with recall inside the perimeter as its headline.
+- **`scripts/make_caldor_dnbr.py`** builds an independent dNBR severity map for Caldor:
+  - **Scenes.** 8 clear pre-fire scenes (June to August 2021) and 8 post-fire scenes (June to August 2022, before the Mosquito Fire), on tiles 10SGH and 10SGJ.
+  - **Method.** SCL-masked median NBR, an offset taken from unburned land, and Key and Benson classes.
+  - **Cost.** 612 MB read in 2 minutes.
+  - **Output.** A tagged, byte-reproducible COG.
+
+**The Caldor demo** (51,443 ha burned, the same run as checkpoint 3, re-run once with every band identical):
+
+| Burned means | IoU | Precision | Recall | F1 |
+|---|---|---|---|---|
+| **Moderate or worse (dNBR proxy)** | **0.813** | 0.942 | 0.856 | 0.897 |
+| Low or worse (dNBR proxy) | 0.619 | 0.989 | 0.623 | 0.764 |
+| Hansen-derived 2021 outline (checkpoint 3) | 0.645 | 0.933 | 0.677 | 0.784 |
+
+| Severity class | Detected | Share of the app's burned pixels | Median embedding distance |
+|---|---|---|---|
+| High | 99.6% | 40.2% | 0.481 |
+| Moderate | 77.5% | 53.9% | 0.364 |
+| Low | 9.7% | 4.7% | 0.131 |
+| Unburned to low | 0.3% | 1.0% | 0.037 |
+
+**The app maps moderate-or-worse burn.** The embedding distance rises steadily with severity, and the Otsu threshold (0.244) falls between low and moderate. About three quarters of the outline pixels the app missed are low severity or unburned. The checkpoint passes the stop rule at 0.813.
+
+That number is likely optimistic against real MTBS, for two reasons. The proxy and the embeddings both come from Sentinel-2. And the proxy's offset region was set using the Hansen outline.
+
+**Review.** One reviewer, a skeptic, then a fix agent: 20 findings, 17 survived and were fixed. Notable fixes:
+- Adding `--validate` after a severity-only run never scored the outline.
+- The stop rule read the IoU at whatever minimum class was asked for, not at moderate.
+- Class 0 (background in MTBS files) was excluded, so detections outside a mapped fire never counted as false positives. It is now scored as unburned.
+- The proxy's COG embedded a timestamp, so it was not reproducible.
+
+### Surprises
+
+- **The store moved.** Main head is now snapshot `RC6FS07ZB0T76EXT8XRG`, not `B6AFRJGX5XQC0A716PA0`. The Caldor output came out identical band for band.
+- **GLAD canopy height is not a series of independent yearly measurements.** Stable forest has exactly the same height in all ten years, and new stands climb in 5 m steps. Its onset year is when the product detects trees, at 5 m. The embeddings saw the Itapebi planting a year before that, and Jaru's regrowth about two years before.
+- **The Sentinel-2 bucket's offset metadata is wrong both ways for processing baseline 04.00 and later.** The script decides from the data whether the offset is still there.
+- **Most of the tropics fails the "mature stand within 10 km" test** for a pasture landscape (inland Mato Grosso do Sul, Guanacaste), and the store has no radar in 2022 to 2024 over much of inland São Paulo and Paraná.
+
+### Changes to the brief
+
+1. **Section 4.4 step 1.** Match the control on a year before the baseline, not the baseline itself. Define "the site's own distribution" as cosine similarity to the site mean, with a held-out cut (survey S17).
+2. **Section 4.4 steps 3 and 6.** Call divergence against site-sized placebos, not by eye or by trend. A planting is a step, not a steady rise, and a verdict on the slope would miss it.
+3. **Section 4.4 Validation.**
+   - **Null test.** The control-against-control halves test is easy to pass, because each half is usually far larger than the site. Report the placebo false positive rate alongside it.
+   - **Canopy height.** Add an independent canopy height comparison where trees are the goal.
+4. **Section 4.4 step 4.** Calibrate "percent of the way to mature" with the target's own two halves, and warn that a plantation reads closer to a mature stand than natural regrowth does.
+5. **Section 4.4 demo.** Allow a synthetic site located from public layers when no project polygon is reachable, and prefer a planting whose date imagery confirms.
+6. **Sections 4.1, 5 and 8 (wildfire).** Validate against burn severity (MTBS), and make the checkpoint 3 stop rule the IoU against moderate or worse burn.
+7. **Section 6.** Add a validation-only rerun when only validation inputs change. Adding `--severity` to a finished Caldor run re-reads all 23 GB today.
+
+### Known issues
+
+- **Wildfire memory estimate:** 4.8 GB for Caldor against a measured peak of 5.15 GB.
+- **Misleading band name:** the restore COG's `baseline_similarity` band holds the match-year similarity, as its description says.
+- **Treated land in a control:** a control ring can hold treated land, like the Itapebi negative's neighbouring compartment. An option to exclude known projects from the ring would help.

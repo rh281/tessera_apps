@@ -2665,7 +2665,7 @@ def test_natural_earth_errors(web, tmp_path):
 
 
 def test_demo_aois():
-    assert set(DEMO_NAMES) == {"caldor", "rondonia", "everglades"}
+    assert set(DEMO_NAMES) == {"caldor", "rondonia", "everglades", "itapebi", "jaru"}
     rondonia = demo_aoi("rondonia")
     assert rondonia.bounds == pytest.approx((-63.20087, -8.75983, -63.01913, -8.58017))
     assert demo_aoi(" Everglades ").bounds == pytest.approx(EVERGLADES_BBOX)

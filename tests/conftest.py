@@ -339,3 +339,297 @@ def write_worldcover_tiles(
         with rasterio.open(directory / name, "w", **profile) as ds:
             ds.write(data, 1)
     return str(directory / "ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif")
+
+
+# --------------------------------------------------------------------------------------------
+# Designed stores whose pixels follow a class map (restore tests)
+# --------------------------------------------------------------------------------------------
+
+#: Size of the table of noise vectors a designed zone draws from; prime, so the per-pixel index cycles slowly.
+NOISE_TABLE = 509
+
+
+def designed_zone(
+    root: zarr.Group,
+    zone: str,
+    *,
+    left: float,
+    top: float,
+    height: int,
+    width: int,
+    pattern: Callable[[np.ndarray, np.ndarray, int], tuple[np.ndarray, ...]],
+    prototypes: Callable[[int], np.ndarray],
+    noise_sd: float = 6.0,
+    chunk: int = 64,
+    shard: int | None = None,
+    years_complete: list[int] | None = None,
+    seed: int = 0,
+) -> zarr.Group:
+    """A zone group whose pixel vectors follow a class map, built strip by strip so large grids stay cheap.
+
+    ``pattern(rows, cols, year)`` returns ``(classes, data, radar)``: the int class of every pixel (an
+    index into ``prototypes(year)``, a (K, 128) array of float vectors), where the pixel has data, and
+    where it has Sentinel-1. A pixel's vector is its class prototype plus a noise vector of standard
+    deviation ``noise_sd``, taken from a seeded table of :data:`NOISE_TABLE` vectors by a hash of the
+    pixel and the year (so repeated vectors keep a large store small once compressed), rounded and
+    clipped to int8. Scales vary per pixel, so means of raw int8 vectors differ from dequantized ones.
+    One chunk per shard by default, so a KeyLog names exactly the chunks read.
+    """
+    rng = np.random.default_rng(seed)
+    table = np.round(rng.normal(0.0, noise_sd, size=(NOISE_TABLE, N_BANDS))).astype(np.int16)
+
+    def fill(name: str, ti: int, shape: tuple[int, ...]) -> np.ndarray:
+        year = FIRST_YEAR + ti
+        protos = np.round(np.asarray(prototypes(year), dtype=np.float64)).astype(np.int16)
+        h, w = shape[0], shape[1]
+        if name == "embeddings":
+            out = np.zeros(shape, dtype=np.int8)
+        elif name == "scales":
+            out = np.full(shape, np.nan, dtype=np.float32)
+        else:
+            out = np.zeros(shape, dtype=np.uint16)
+        step = 128
+        for r0 in range(0, h, step):
+            rows, cols = np.mgrid[r0 : min(r0 + step, h), 0:w]
+            classes, data, radar = pattern(rows, cols, year)[:3]
+            if name == "embeddings":
+                idx = (rows * 7919 + cols * 104729 + year * 1_000_003) % NOISE_TABLE
+                e = protos[classes] + table[idx]
+                e = np.clip(e, -127, 127).astype(np.int8)
+                e[~data] = 0
+                out[r0 : r0 + rows.shape[0]] = e
+            elif name == "scales":
+                s = 0.01 * (1.0 + 0.05 * ((rows * 7 + cols * 3) % 11))
+                out[r0 : r0 + rows.shape[0]] = np.where(data, s, np.nan)
+            elif name == "s1_asc_obs_count":
+                out[r0 : r0 + rows.shape[0]] = np.where(radar, 30, 0)
+            elif name == "s2_obs_count":
+                out[r0 : r0 + rows.shape[0]] = 50
+        return out
+
+    return add_zone(
+        root,
+        zone,
+        left=left,
+        top=top,
+        height=height,
+        width=width,
+        fill=fill,
+        years_complete=years_complete,
+        chunk=chunk,
+        shard=chunk if shard is None else shard,
+    )
+
+
+def designed_store(
+    zones: dict[str, dict[str, Any]],
+) -> tuple[TesseraReader, KeyLog, MemoryStore]:
+    """An in-memory store of :func:`designed_zone` groups, ``{zone: designed_zone keyword arguments}``.
+
+    Returns:
+        ``(reader, log, mem)``: a reader behind a fresh KeyLog, the log and the store.
+    """
+    mem = MemoryStore()
+    root = zarr.open_group(mem, mode="w")
+    root.attrs.update({"checkpoint_id": "tessera_v1_1_aws_encoder.pt", "geoemb:dimensions": N_BANDS})
+    for zone, kwargs in zones.items():
+        designed_zone(root, zone, **kwargs)
+    log = KeyLog(mem)
+    return TesseraReader.from_store(log), log, mem
+
+
+def write_tch_tiles(
+    directory: Path,
+    epsg: int,
+    left: float,
+    top: float,
+    heights_by_year: dict[int, np.ndarray],
+    *,
+    pixel: float = 10.0,
+    margin: int = 8,
+) -> str:
+    """GLAD canopy height tile pieces whose pixels take the height of the zone grid pixel under their centre.
+
+    ``heights_by_year[year]`` is a uint8 (H, W) array on a zone grid with corner ``(left, top)`` in
+    ``epsg``; each piece lies on the global 0.00025 degree Hansen grid, covers that window plus
+    ``margin`` pixels (0 outside it), and is saved as ``<directory>/<year>/<tile>.tif`` with the tile
+    named like the real one of its centre. Returns the ``url_template`` for the loader.
+    """
+    import math
+
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from tessera_apps import validate
+
+    res = validate.HANSEN_RES_DEG
+    to_ll = Transformer.from_crs(epsg, 4326, always_xy=True)
+    to_zone = Transformer.from_crs(4326, epsg, always_xy=True)
+    for year, heights in heights_by_year.items():
+        h, w = heights.shape
+        xs = [left, left + w * pixel]
+        ys = [top - h * pixel, top]
+        lons, lats = to_ll.transform([xs[0], xs[0], xs[1], xs[1]], [ys[0], ys[1], ys[0], ys[1]])
+        x0, x1 = math.floor(min(lons) / res) - margin, math.ceil(max(lons) / res) + margin
+        y0, y1 = math.floor(min(lats) / res) - margin, math.ceil(max(lats) / res) + margin
+        cols, rows = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y1, y0, -1) - 0.5)
+        zx, zy = to_zone.transform(cols * res, rows * res)
+        zr = np.floor((top - np.asarray(zy)) / pixel).astype(np.int64)
+        zc = np.floor((np.asarray(zx) - left) / pixel).astype(np.int64)
+        inside = (zr >= 0) & (zr < h) & (zc >= 0) & (zc < w)
+        data = np.zeros(zr.shape, dtype=np.uint8)
+        data[inside] = heights[zr[inside], zc[inside]]
+        tile = validate.hansen_tile((min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2)
+        profile = {
+            "driver": "GTiff",
+            "width": data.shape[1],
+            "height": data.shape[0],
+            "count": 1,
+            "dtype": "uint8",
+            "crs": "EPSG:4326",
+            "transform": from_origin(x0 * res, y1 * res, res, res),
+        }
+        (directory / str(year)).mkdir(parents=True, exist_ok=True)
+        with rasterio.open(directory / str(year) / f"{tile}.tif", "w", **profile) as ds:
+            ds.write(data, 1)
+    return str(directory / "{year}" / "{tile}.tif")
+
+
+# --------------------------------------------------------------------------------------------
+# Restore scenarios: a site, its ring, a target stand and a crop patch on a designed 10N grid
+# --------------------------------------------------------------------------------------------
+
+_RESTORE_RNG = np.random.default_rng(2026)
+#: Land type prototypes: the site starts as pasture and moves towards forest from the planting year.
+PASTURE = _RESTORE_RNG.integers(-40, 41, size=N_BANDS).astype(np.float64)
+FOREST = _RESTORE_RNG.integers(-40, 41, size=N_BANDS).astype(np.float64)
+CROP = _RESTORE_RNG.integers(-40, 41, size=N_BANDS).astype(np.float64)
+#: Added to every vector in a radar-free year of a whole-grid switch, as the survey B5 regime shift does.
+RADAR_SHIFT = _RESTORE_RNG.integers(-20, 21, size=N_BANDS).astype(np.float64)
+RESTORE_CENTRE = (-121.0, 38.5)
+RESTORE_EPSG = 32610
+RESTORE_PLANTED = 2020
+#: Years the site takes to become forest, from the year before planting.
+RESTORE_RAMP = 5
+#: Grid boxes ((row0, row1), (col0, col1)) of the 192 x 192 scenario: the site in the middle, a forest
+#: target stand outside the ring, and crop filling the top-right 64 x 64 chunk of the ring.
+SITE_BOX = ((86, 106), (86, 106))
+TARGET_BOX = ((160, 186), (10, 36))
+CROP_BOX = ((0, 64), (128, 192))
+#: The ring the scenario tests use (the default 1 to 3 km needs the large grid).
+SMALL_RING = {"ring_inner_km": 0.1, "ring_outer_km": 0.5}
+
+CLASS_PASTURE, CLASS_FOREST, CLASS_CROP, CLASS_SITE = 0, 1, 2, 3
+
+
+def restore_corner(centre: tuple[float, float] = RESTORE_CENTRE) -> tuple[float, float]:
+    """A 10N grid corner on whole kilometres near ``centre``, so 200 m fold cells start on grid pixels."""
+    x, y = Transformer.from_crs(4326, RESTORE_EPSG, always_xy=True).transform(*centre)
+    return float((x // 1000) * 1000), float((y // 1000) * 1000)
+
+
+def in_box(rows: np.ndarray, cols: np.ndarray, box_rc: tuple[tuple[int, int], tuple[int, int]]) -> np.ndarray:
+    (r0, r1), (c0, c1) = box_rc
+    return (rows >= r0) & (rows < r1) & (cols >= c0) & (cols < c1)
+
+
+def site_weight(year: int, planted: int = RESTORE_PLANTED, ramp: int = RESTORE_RAMP) -> float:
+    """How far the moving site is from pasture (0) to forest (1) in ``year``."""
+    return min(max((year - (planted - 1)) / ramp, 0.0), 1.0)
+
+
+def restore_pattern(
+    *,
+    moves: bool = True,
+    crop: bool = True,
+    site: tuple[tuple[int, int], tuple[int, int]] = SITE_BOX,
+    target: tuple[tuple[int, int], tuple[int, int]] | None = TARGET_BOX,
+    crop_box: tuple[tuple[int, int], tuple[int, int]] = CROP_BOX,
+    holes: tuple[tuple[int, tuple[tuple[int, int], tuple[int, int]]], ...] = (),
+    radar_free: tuple[tuple[int, tuple[tuple[int, int], tuple[int, int]]], ...] = (),
+    switch_years: tuple[int, ...] = (),
+    planted: int = RESTORE_PLANTED,
+) -> tuple[Callable[[np.ndarray, np.ndarray, int], tuple[np.ndarray, ...]], Callable[[int], np.ndarray]]:
+    """The class map and prototypes of a restore scenario, for :func:`designed_zone`.
+
+    Pasture everywhere, the site (moving from pasture to forest from ``planted`` over
+    :data:`RESTORE_RAMP` years when ``moves``, pasture throughout otherwise), a forest ``target`` and a
+    ``crop`` patch. ``holes`` are ``(year, box)`` with no data, ``radar_free`` ``(year, box)`` without
+    Sentinel-1, and ``switch_years`` years in which the whole grid is radar-free and every vector is
+    shifted by :data:`RADAR_SHIFT`.
+    """
+
+    def prototypes(year: int) -> np.ndarray:
+        w = site_weight(year, planted) if moves else 0.0
+        protos = np.stack([PASTURE, FOREST, CROP, (1.0 - w) * PASTURE + w * FOREST])
+        return protos + (RADAR_SHIFT if year in switch_years else 0.0)
+
+    def pattern(rows: np.ndarray, cols: np.ndarray, year: int) -> tuple[np.ndarray, ...]:
+        classes = np.full(rows.shape, CLASS_PASTURE, dtype=np.int64)
+        if crop:
+            classes[in_box(rows, cols, crop_box)] = CLASS_CROP
+        if target is not None:
+            classes[in_box(rows, cols, target)] = CLASS_FOREST
+        classes[in_box(rows, cols, site)] = CLASS_SITE
+        data = np.ones(rows.shape, dtype=bool)
+        for y, b in holes:
+            if y == year:
+                data &= ~in_box(rows, cols, b)
+        radar = np.full(rows.shape, year not in switch_years, dtype=bool)
+        for y, b in radar_free:
+            if y == year:
+                radar &= ~in_box(rows, cols, b)
+        return classes, data, radar
+
+    return pattern, prototypes
+
+
+def restore_store(
+    *,
+    size: int = 192,
+    chunk: int = 64,
+    years_complete: list[int] | None = None,
+    centre: tuple[float, float] = RESTORE_CENTRE,
+    **pattern_kwargs: Any,
+) -> tuple[TesseraReader, KeyLog, MemoryStore]:
+    """A one-zone (10N) restore scenario store: :func:`restore_pattern` on a ``size`` grid at :func:`restore_corner`."""
+    pattern, prototypes = restore_pattern(**pattern_kwargs)
+    left, top = restore_corner(centre)
+    return designed_store(
+        {
+            "10N": {
+                "left": left,
+                "top": top,
+                "height": size,
+                "width": size,
+                "pattern": pattern,
+                "prototypes": prototypes,
+                "chunk": chunk,
+                "years_complete": years_complete,
+            }
+        }
+    )
+
+
+def grid_polygon(
+    left: float, top: float, box_rc: tuple[tuple[int, int], tuple[int, int]], epsg: int = RESTORE_EPSG
+) -> Any:
+    """The lon/lat polygon of grid pixels ``((row0, row1), (col0, col1))`` of a grid with corner (left, top)."""
+    import shapely
+    from shapely.geometry import box
+
+    (r0, r1), (c0, c1) = box_rc
+    square = box(left + c0 * 10.0, top - r1 * 10.0, left + c1 * 10.0, top - r0 * 10.0)
+    to_ll = Transformer.from_crs(epsg, 4326, always_xy=True)
+    return shapely.transform(shapely.segmentize(square, 10.0), to_ll.transform, interleaved=False)
+
+
+def write_polygon(path: Path, geometry: Any, properties: dict[str, Any] | None = None) -> Path:
+    """Write one lon/lat geometry as a GeoJSON FeatureCollection."""
+    import json
+
+    from shapely.geometry import mapping
+
+    feature = {"type": "Feature", "properties": properties or {}, "geometry": mapping(geometry)}
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}), encoding="utf-8")
+    return path

@@ -94,33 +94,48 @@ def _fmt(value: Any, spec: str = ".3f") -> str:  # noqa: ANN401
 
 
 def _print_severity(console: Console, sev: Mapping[str, Any]) -> None:
-    """The severity scores of a wildfire run: per-class detection, then the binary scores."""
+    """The severity scores of a wildfire run: per-class detection, then the binary scores.
+
+    The file name is escaped, so a bracket in it is printed, not read as rich markup.
+    """
+    from rich.markup import escape
     from rich.table import Table
 
-    from tessera_apps.apps.wildfire import SEVERITY_HEADLINE_ORDER, SEVERITY_NAMES
+    from tessera_apps.apps.wildfire import (
+        SEVERITY_BACKGROUND,
+        SEVERITY_HEADLINE_ORDER,
+        SEVERITY_NAMES,
+        SEVERITY_STOP_CLASS,
+    )
+
+    def scores(block: Mapping[str, Any]) -> str:
+        return (
+            f"IoU {_fmt(block.get('iou'))}, precision {_fmt(block.get('precision'))}, recall "
+            f"{_fmt(block.get('recall'))}, F1 {_fmt(block.get('f1'))}"
+        )
 
     what = "Sentinel-2 dNBR proxy, not MTBS" if sev.get("proxy") else "severity map"
-    table = Table(title=f"Burned mask against {sev.get('file')} ({what})")
+    table = Table(title=f"Burned mask against {escape(str(sev.get('file')))} ({what})")
     for col in ("class", "detected", "burned px in class"):
         table.add_column(col, justify="right")
     rates = sev.get("detection_rate_by_class") or {}
     where = sev.get("detections_by_class") or {}
-    for c in SEVERITY_HEADLINE_ORDER:
+    for c in (*SEVERITY_HEADLINE_ORDER, SEVERITY_BACKGROUND):
         table.add_row(f"{c} {SEVERITY_NAMES[c]}", _fmt(rates.get(str(c)), ".1%"), _fmt(where.get(str(c)), ".1%"))
     console.print(table)
-    low = sev.get("low_or_worse") or {}
-    excluded = sev.get("excluded") or {}
+    stop = ""
+    if sev.get("min_class") != SEVERITY_STOP_CLASS:
+        stop = f"; moderate or worse (the stop rule's): {scores(sev.get('moderate_or_worse') or {})}"
     console.print(
-        f"Severity, class {sev.get('min_class')} ({sev.get('min_class_name')}) or worse: IoU {_fmt(sev.get('iou'))}, "
-        f"precision {_fmt(sev.get('precision'))}, recall {_fmt(sev.get('recall'))}, F1 {_fmt(sev.get('f1'))}; "
-        f"low or worse: IoU {_fmt(low.get('iou'))}, precision {_fmt(low.get('precision'))}, recall "
-        f"{_fmt(low.get('recall'))}, F1 {_fmt(low.get('f1'))}"
+        f"Severity, class {sev.get('min_class')} ({sev.get('min_class_name')}) or worse: {scores(sev)}{stop}; "
+        f"low or worse: {scores(sev.get('low_or_worse') or {})}"
     )
-    background, non_processing = excluded.get("background_pixels"), excluded.get("non_processing_pixels")
+    excluded = sev.get("excluded") or {}
+    unmapped, non_processing = excluded.get("unmapped_pixels"), excluded.get("non_processing_pixels")
     console.print(
-        f"Severity: burned pixels in background or outside the map {_fmt(where.get('0'), '.1%')}, in "
-        f"non-processing {_fmt(where.get('6'), '.1%')}; excluded classified pixels: {_fmt(background, ',')} "
-        f"background, {_fmt(non_processing, ',')} non-processing"
+        f"Severity: burned pixels outside the map {_fmt(where.get('unmapped'), '.1%')}, in non-processing "
+        f"{_fmt(where.get('6'), '.1%')}; excluded classified pixels: {_fmt(unmapped, ',')} outside the map, "
+        f"{_fmt(non_processing, ',')} non-processing"
     )
 
 
@@ -262,7 +277,10 @@ def wildfire(
         int,
         typer.Option(
             "--severity-min-class",
-            help="Lowest severity class counted as burned: 1 unburned to low, 2 low, 3 moderate, 4 high.",
+            help=(
+                "Lowest severity class counted as burned: 1 unburned to low, 2 low, 3 moderate, 4 high. The IoU 0.6 "
+                "stop rule reads moderate or worse whatever this is."
+            ),
         ),
     ] = 3,
 ) -> None:
@@ -804,3 +822,292 @@ def wetland(
     _print_wetland(result.report, skipped=result.skipped, out=out, validation_redone=result.validation_redone)
     if do_validate and not result.validation_written and strict_validate:
         raise _fail("Error: --strict-validate is set and the validation reference was not loaded.", EXIT_VALIDATION)
+
+
+def _print_restore(report: Mapping[str, Any], *, skipped: bool, out: Path) -> None:
+    """The run summary: verdict, trajectory table, control, regime, site-sized null, null test, canopy, cost.
+
+    Every value that comes from the user or the outside (paths, error text, warnings) is escaped, so
+    a bracket in it is printed, not read as rich markup.
+    """
+    from rich.console import Console
+    from rich.markup import escape
+    from rich.table import Table
+
+    def e(value: Any) -> str:  # noqa: ANN401
+        return escape(str(value))
+
+    console = Console()
+    s = report.get("summary") or {}
+    if skipped:
+        console.print(f"Outputs in {e(out)} are current for these arguments; pass --force to rerun.")
+    console.print(f"[bold]Verdict: {e(s.get('verdict'))}[/bold]")
+    console.print(f"  {e(s.get('verdict_detail'))}")
+    site = s.get("site") or {}
+    console.print(
+        f"Restore, planted {e(s.get('planted'))}, years {e(s.get('year_a'))} to {e(s.get('year_b'))}; site "
+        f"{e(site.get('source'))}: {_fmt(site.get('area_ha'), ',.1f')} ha, {_fmt(site.get('pixels_used'), ',')} of "
+        f"{_fmt(site.get('pixels'), ',')} pixels used, in {e(', '.join(s.get('zones') or []))}"
+    )
+    table = Table(title="Trajectory (divergence from control, change since the baseline, placebo band)")
+    columns = (
+        ("year", "year", "d"),
+        ("post", "post_planting", "b"),
+        ("D", "divergence", ".4g"),
+        ("dD", "divergence_change", ".4g"),
+        ("p05", "placebo_p05", ".4g"),
+        ("p50", "placebo_p50", ".4g"),
+        ("p95", "placebo_p95", ".4g"),
+        ("sig", "significant", "b"),
+        ("null dD", "null_divergence_change", ".4g"),
+        ("departed chg", "departed_fraction_change", "+.1%"),
+        ("closer to target", "closer_to_target_fraction", ".1%"),
+        ("progress", "target_progress", ".2f"),
+        ("radar-free", "site_radar_free_fraction", ".0%"),
+    )
+    for name, _key, _spec in columns:
+        table.add_column(name, justify="right")
+    for row in s.get("trajectory") or []:
+        cells = []
+        for _name, key, spec in columns:
+            value = row.get(key)
+            if spec == "b":
+                cells.append("yes" if value else "no")
+            elif spec == "d":
+                cells.append(e(value))
+            else:
+                cells.append(_fmt(value, spec))
+        table.add_row(*cells)
+    console.print(table)
+    cover = s.get("match_year_data") or {}
+    shares = [
+        f"{role} {_fmt(rec.get('with_data'), ',')} of {_fmt(rec.get('pixels'), ',')}"
+        for role in ("site", "ring", "control", "target")
+        if isinstance(rec := cover.get(role), Mapping)
+    ]
+    if shares:
+        console.print(
+            f"Match year {e(cover.get('year'))} (the control filter's only year): pixels with data, "
+            + e("; ".join(shares))
+        )
+    ctrl = s.get("control") or {}
+    if ctrl.get("source") == "ring":
+        console.print(
+            f"Control: ring {_fmt(ctrl.get('ring_inner_km'), 'g')} to {_fmt(ctrl.get('ring_outer_km'), 'g')} km, "
+            f"{_fmt(ctrl.get('kept_pixels'), ',')} of {_fmt(ctrl.get('candidate_pixels_valid_match_year'), ',')} "
+            f"pixels kept at a {e(ctrl.get('match_year'))} similarity of "
+            f"{_fmt(ctrl.get('threshold_similarity'), '.4f')} or more ("
+            + ("held-out" if ctrl.get("threshold_source") == "heldout" else "in-sample, fallback")
+            + f" {_fmt(ctrl.get('control_pct'), 'g')}th percentile, {e(ctrl.get('folds'))} folds of "
+            f"{e(ctrl.get('site_cells'))} cells)"
+        )
+        if ctrl.get("selection_drift") is not None:
+            console.print(
+                f"  matched on {e(ctrl.get('match_year'))}, before the baseline: the selection drift to the "
+                f"baseline ({_fmt(ctrl.get('selection_drift'), '.5f')}) stays out of dD"
+            )
+    else:
+        console.print(
+            f"Control: {e(ctrl.get('file'))}, {_fmt(ctrl.get('kept_pixels'), ',')} pixels used as given; "
+            f"{_fmt(ctrl.get('share_below_threshold'), '.0%')} of them below the held-out threshold "
+            f"{_fmt(ctrl.get('threshold_similarity'), '.4f')}"
+        )
+    balance = ctrl.get("balance") or {}
+    console.print(
+        f"  baseline divergence {_fmt(balance.get('baseline_divergence'), '.5f')}, above "
+        f"{_fmt(balance.get('baseline_divergence_rank'), '.0%')} of the placebos' (median "
+        f"{_fmt(balance.get('placebo_baseline_divergence_p50'), '.5f')})"
+    )
+    regime = s.get("regime") or {}
+    dropped = regime.get("dropped") or {}
+    console.print(
+        "Panel and radar regime: "
+        + "; ".join(
+            f"{e(role)} {_fmt(d.get('used'), ',')} used, {_fmt(d.get('panel'), ',')} without data some year, "
+            f"{_fmt(d.get('regime'), ',')} other radar pattern"
+            for role, d in dropped.items()
+            if d.get("read")
+        )
+    )
+    if regime.get("radar_free_years"):
+        console.print(f"  radar-free years in the majority pattern: {e(regime['radar_free_years'])}")
+    placebos = s.get("placebos") or {}
+    trend = s.get("trend") or {}
+    console.print(
+        f"Site-sized null (placebos): {e(placebos.get('diverging_placebos'))} of {e(placebos.get('count'))} called "
+        f"diverging, false positive rate {_fmt(placebos.get('false_positive_rate'), '.1%')} (at most about 5% by "
+        "construction: it checks the run rule, not the band's calibration)"
+    )
+    console.print(
+        f"  placebos of the site's footprint ({_fmt(placebos.get('radius_m'), '.0f')} m radius): a median of "
+        f"{_fmt(placebos.get('pixels_median'), ',.0f')} pixels against the site's "
+        f"{_fmt(site.get('pixels_used'), ',')}. "
+        f"Trend after planting: Theil-Sen {_fmt(trend.get('theil_sen_slope'), '.4f')} per year, Spearman rho "
+        f"{_fmt(trend.get('spearman_rho'), '.2f')}"
+    )
+    null = s.get("null_test") or {}
+    if null.get("error"):
+        console.print(f"Null test: not run ({e(null['error'])})")
+    else:
+        from tessera_apps.apps.restore import NULL_EASY_RATIO
+
+        ratio = null.get("half_to_site_pixels")
+        easy = not isinstance(ratio, (int, float)) or ratio >= NULL_EASY_RATIO
+        console.print(
+            f"Null test (control halves, {_fmt(ratio, '.1f')} times the site's pixels each, "
+            f"{'so easy to pass' if easy else 'so about as demanding as a site-sized test'}): ratio to the site "
+            f"{_fmt(null.get('null_to_site_ratio'), '.3f')}; "
+            f"{e(null.get('null_verdict'))}, max change {_fmt(null.get('null_max_abs_change'), '.5f')} against the "
+            f"site's {_fmt(null.get('site_max_abs_change'), '.5f')}, near zero: {e(null.get('null_near_zero'))}"
+        )
+    target = s.get("target")
+    if isinstance(target, Mapping):
+        console.print(
+            f"Target: {_fmt(target.get('pixels'), ',')} pixels; progress is unclipped "
+            "(0 is the control's similarity to the target, 1 the target's own halves')"
+        )
+    canopy = s.get("canopy")
+    if isinstance(canopy, Mapping):
+        if canopy.get("error"):
+            console.print(f"Canopy check: not done ({e(canopy['error'])})")
+        else:
+            console.print(
+                f"Canopy check (GLAD tree canopy height {e((canopy.get('years') or [None])[0])} to "
+                f"{e((canopy.get('years') or [None])[-1])}): onset year {e(canopy.get('canopy_onset_year'))}, "
+                f"correlation of dD with the mean height gap change {e(canopy.get('correlation_sign'))} over "
+                f"{e(canopy.get('correlation_years'))} years (Pearson "
+                f"{_fmt(canopy.get('pearson_divergence_vs_mean_gap_change'), '.2f')}, Spearman "
+                f"{_fmt(canopy.get('spearman_divergence_vs_mean_gap_change'), '.2f')}; few years, read the sign)"
+            )
+    console.print(f"Limitation: {e(s.get('limitation'))}")
+    wall = (report.get("timings") or {}).get("wall_s")
+    cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
+    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    for warning in report.get("warnings") or []:
+        console.print(f"[yellow]Warning:[/yellow] {e(warning)}", markup=True)
+
+
+@app.command()
+def restore(
+    aoi: Annotated[
+        str,
+        typer.Option(
+            "--aoi",
+            "--site",
+            help=(
+                "The site polygon (GeoJSON, GeoPackage, shapefile; any CRS), a demo name (itapebi, jaru), or "
+                "<demo>:<role> for another feature of a demo as the site (itapebi:negative)."
+            ),
+        ),
+    ],
+    planted: Annotated[
+        int | None, typer.Option("--planted", help="Planting year (a demo site's properties may give it).")
+    ] = None,
+    year_a: Annotated[
+        int | None,
+        typer.Option(
+            "--year-a",
+            help="Baseline year, before planting (default: planted - 1).",
+        ),
+    ] = None,
+    year_b: Annotated[int | None, typer.Option("--year-b", help="Last year (default: 2025).")] = None,
+    match_year: Annotated[
+        int | None,
+        typer.Option(
+            "--match-year",
+            help=(
+                "Year the control filter runs on, at most --year-a (default: the year before the baseline, or the "
+                "baseline when it is 2017). Only the ring needs data that year."
+            ),
+        ),
+    ] = None,
+    control: Annotated[
+        str | None,
+        typer.Option("--control", help="A control polygon used as given (no filter), or 'demo'; the ring otherwise."),
+    ] = None,
+    target: Annotated[
+        str | None, typer.Option("--target", help="A mature reference stand (polygon), or 'demo'.")
+    ] = None,
+    out: Annotated[Path, typer.Option("--out", help="Output directory.")] = DEFAULT_OUT,
+    validate: Annotated[
+        bool, typer.Option("--validate", help="Write the validation file: the null test and the canopy check.")
+    ] = False,
+    canopy: Annotated[
+        bool, typer.Option("--canopy/--no-canopy", help="With --validate, check against GLAD tree canopy height.")
+    ] = True,
+    ring_inner_km: Annotated[float, typer.Option("--ring-inner-km", help="Inner edge of the control ring.")] = 1.0,
+    ring_outer_km: Annotated[
+        float, typer.Option("--ring-outer-km", help="Outer edge of the control ring, at most 10 km.")
+    ] = 3.0,
+    control_pct: Annotated[
+        float,
+        typer.Option(
+            "--control-pct", help="Percentile of the held-out site similarities that sets the control filter."
+        ),
+    ] = 5.0,
+    folds: Annotated[int, typer.Option("--folds", help="Spatial folds of the site's pixels.")] = 5,
+    fold_cell_m: Annotated[
+        float, typer.Option("--fold-cell-m", help="Grid cell (metres) that blocks the site's pixels into folds.")
+    ] = 200.0,
+    placebos: Annotated[int, typer.Option("--placebos", help="Placebo pseudo-sites drawn from the control.")] = 200,
+    min_post_years: Annotated[int, typer.Option("--min-post-years", help="Post-planting years the verdict needs.")] = 3,
+    seed: Annotated[int, typer.Option("--seed", help="Seed of the folds, the placebos and the target halves.")] = 0,
+    force: Annotated[bool, typer.Option("--force", help="Rerun even when the outputs are current.")] = False,
+    snapshot: Annotated[str | None, typer.Option("--snapshot", help="Pin an Icechunk snapshot id.")] = None,
+    i_know_this_is_large: Annotated[
+        bool, typer.Option("--i-know-this-is-large", help="Lift the 10,000 km2 limit on the extent and the target.")
+    ] = False,
+    strict_validate: Annotated[
+        bool,
+        typer.Option(
+            "--strict-validate",
+            help=(
+                "Exit with code 3 when --validate cannot be done: before reading any chunk when the canopy layer "
+                "cannot be loaded, and before writing outputs when the null test cannot run."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Is a restoration site diverging from a matched control the way a working project should?"""
+    from tessera_apps import io
+    from tessera_apps.apps import AppInputError, StrictValidationError, run_restore
+
+    with _rich_logging():
+        try:
+            result = run_restore(
+                aoi,
+                out,
+                planted=planted,
+                year_a=year_a,
+                year_b=year_b,
+                match_year=match_year,
+                control=control,
+                target=target,
+                validate=validate,
+                canopy=canopy,
+                ring_inner_km=ring_inner_km,
+                ring_outer_km=ring_outer_km,
+                control_pct=control_pct,
+                folds=folds,
+                fold_cell_m=fold_cell_m,
+                placebos=placebos,
+                min_post_years=min_post_years,
+                seed=seed,
+                force=force,
+                max_area_km2=None if i_know_this_is_large else io.MAX_AOI_KM2,
+                snapshot_id=snapshot,
+                strict_validate=strict_validate and validate,
+            )
+        except StrictValidationError as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_VALIDATION) from exc
+        except (AppInputError, io.TesseraError) as exc:
+            raise _fail(f"Error: {_error_text(exc)}", EXIT_USAGE) from exc
+    _print_restore(result.report, skipped=result.skipped, out=out)
+    if validate and strict_validate:
+        summary = result.report.get("summary") or {}
+        canopy_rec = summary.get("canopy")
+        if canopy and isinstance(canopy_rec, Mapping) and canopy_rec.get("error"):
+            raise _fail("Error: --strict-validate is set and the canopy check could not be done.", EXIT_VALIDATION)
+        null_rec = summary.get("null_test")
+        if isinstance(null_rec, Mapping) and null_rec.get("error"):
+            raise _fail("Error: --strict-validate is set and the null test could not run.", EXIT_VALIDATION)

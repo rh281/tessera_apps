@@ -4,6 +4,14 @@ Each demo is a GeoJSON FeatureCollection in EPSG:4326. The feature whose ``role`
 ``"aoi"`` is the AOI (feature 0 in every bundled file); ``caldor.geojson`` also carries the Hansen
 2021 loss outline as a second feature with role ``"hansen_2021_loss_outline"``.
 
+The restore app's demos (:data:`RESTORE_DEMOS`) are ``itapebi.geojson`` (a eucalyptus planting on
+pasture in Bahia, UTM 24S) and ``jaru.geojson`` (natural regrowth on abandoned pasture in Rondonia,
+UTM 20S). Each holds three features: role ``"aoi"`` (the site, with properties ``planted`` 2019 and
+``synthetic`` true: it was located from public layers, it is not a documented project), role
+``"target"`` (a mature forest stand) and role ``"negative"`` (a stand that stayed pasture, also with
+``planted`` 2019, the no-divergence example). :func:`demo_roles` lists a demo's roles and
+:func:`demo_feature_properties` gives the properties of one of them.
+
 The wetland app's default seeds are bundled next to their demo AOI (:data:`DEMO_SEEDS`):
 ``everglades_seeds.geojson`` holds 12 square mangrove stand polygons of about 100 m, every feature
 with role ``"seed"`` (``scripts/make_everglades_seeds.py`` derives them from ESA WorldCover 2020).
@@ -19,8 +27,11 @@ from typing import Any
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-#: Names of the bundled demos, one per app with a demo AOI.
-DEMO_NAMES = ("caldor", "rondonia", "everglades")
+#: Names of the bundled demos: one AOI each for wildfire (caldor), deforest (rondonia) and wetland
+#: (everglades), and the two restore sites.
+DEMO_NAMES = ("caldor", "rondonia", "everglades", "itapebi", "jaru")
+#: The bundled demos of the restore app, each with ``aoi``, ``target`` and ``negative`` features.
+RESTORE_DEMOS = ("itapebi", "jaru")
 #: Bundled seed sets, by the demo AOI they belong to (the wetland app's default ``--seeds``).
 DEMO_SEEDS = {"everglades": "everglades_seeds"}
 #: Names of the bundled seed sets.
@@ -57,6 +68,28 @@ def demo_feature(name: str, role: str) -> BaseGeometry:
             return shape(feature["geometry"])
     roles = [(f.get("properties") or {}).get("role") for f in collection["features"]]
     raise ValueError(f"Demo {name!r} has no feature with role {role!r}; roles present: {roles}.")
+
+
+def demo_roles(name: str) -> list[str | None]:
+    """The ``role`` property of every feature of a bundled demo, in file order (None for a feature without one).
+
+    Raises:
+        ValueError: The demo is unknown.
+    """
+    return [(f.get("properties") or {}).get("role") for f in demo_geojson(name)["features"]]
+
+
+def demo_feature_properties(name: str, role: str) -> dict[str, Any]:
+    """Properties of the demo feature with the given ``role`` property, for example its ``planted`` year.
+
+    Raises:
+        ValueError: The demo is unknown or has no feature with that role.
+    """
+    for feature in demo_geojson(name)["features"]:
+        props = feature.get("properties") or {}
+        if props.get("role") == role:
+            return dict(props)
+    raise ValueError(f"Demo {name!r} has no feature with role {role!r}; roles present: {demo_roles(name)}.")
 
 
 def demo_properties(name: str) -> dict[str, Any]:

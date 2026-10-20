@@ -6,7 +6,9 @@ archive on AWS (the Element 84 ``sentinel-cogs`` bucket, read anonymously, no AW
 
 1. **Grid.** The Caldor demo AOI (``caldor.geojson`` feature 0) in EPSG:32610 at 20 m, on the
    Sentinel-2 20 m grid (edges on multiples of 20 m), so every tile window is read without
-   resampling. Pixels outside the AOI polygon (pixel-centre rule) are 0.
+   resampling. Pixels outside the AOI polygon (pixel-centre rule) are nodata (255): the map does
+   not cover them, so the wildfire app leaves them out instead of scoring them as background (0,
+   which this map never uses).
 2. **Tiles.** The MGRS 100 km squares of UTM zone 10 under the AOI and their neighbours, kept when
    the bucket lists them, reduced to the fewest whose footprints (``tileinfo_metadata.json``)
    cover the AOI. Zone 10 tiles reach past 120 W, so the zone 11 part of the AOI needs no
@@ -44,7 +46,10 @@ archive on AWS (the Element 84 ``sentinel-cogs`` bucket, read anonymously, no AW
 Writes a uint8 COG with the tag ``TESSERA_APPS_SOURCE=sentinel2_dnbr`` (the wildfire app's
 ``--severity`` names it as the Sentinel-2 proxy, not MTBS) and tags recording the scenes, windows,
 thresholds and offset; and a JSON next to it with per-class areas and the sanity checks: the share
-of the Hansen outline in each class, and burned-looking clusters away from the Caldor scar.
+of the Hansen outline in each class, and burned-looking clusters away from the Caldor scar. The COG
+holds nothing that depends on when it was made (the creation time is in the JSON only), so a rerun
+on the same products writes the same bytes, and the file's sha256, which the wildfire app's
+arguments digest keys ``--severity`` on, identifies its content.
 
 Usage:
     python scripts/make_caldor_dnbr.py [--out PATH] [--max-dates 8] [--max-cloud 20]
@@ -116,8 +121,10 @@ NODATA_TIE_POINTS = 1.0
 UNBURNED_BUFFER_M = 2000.0
 #: Key and Benson classes on round(1000 * dNBR).
 THRESHOLDS = {"increased_greenness_below": -100, "low_from": 100, "moderate_from": 270, "high_from": 660}
+#: Value of the pixels outside the AOI, declared as the COG's nodata.
+NODATA = 255
 CLASS_NAMES = {
-    0: "background or outside the AOI",
+    0: "background (not used: pixels outside the AOI are nodata, 255)",
     1: "unburned to low",
     2: "low",
     3: "moderate",
@@ -134,6 +141,7 @@ COLOURS = {
     4: (255, 0, 0, 255),
     5: (127, 255, 0, 255),
     6: (255, 255, 255, 255),
+    NODATA: (0, 0, 0, 0),
 }
 SOURCE_TAG = "sentinel2_dnbr"
 #: Burned-looking clusters (moderate or high) away from the scar at least this large are reported.
@@ -617,10 +625,10 @@ def compose_period(dates: dict[dt.date, list[Product]], grid: Grid, *, workers: 
 
 
 def classify(dnbr: np.ndarray, aoi: np.ndarray) -> np.ndarray:
-    """MTBS dnbr6 codes from an offset dNBR (NaN where undefined) inside the AOI mask."""
+    """MTBS dnbr6 codes from an offset dNBR (NaN where undefined) inside the AOI mask, :data:`NODATA` outside it."""
     d = np.rint(dnbr.astype(np.float64) * 1000.0)
     has = aoi & np.isfinite(d)
-    out = np.zeros(dnbr.shape, dtype=np.uint8)
+    out = np.full(dnbr.shape, NODATA, dtype=np.uint8)
     out[aoi] = 6
     with np.errstate(invalid="ignore"):
         out[has & (d < THRESHOLDS["increased_greenness_below"])] = 5
@@ -682,13 +690,17 @@ def clusters_away(classes: np.ndarray, away: np.ndarray, grid: Grid) -> dict[str
 
 
 def write_cog(path: Path, classes: np.ndarray, grid: Grid, tags: dict[str, str]) -> Path:
-    """Write the classes as a uint8 COG with tags and a colour table, atomically."""
+    """Write the classes as a uint8 COG with tags, a colour table and nodata :data:`NODATA`, atomically.
+
+    The bytes depend only on the arguments, so pass no tag that changes from run to run.
+    """
     profile = {
         "driver": "GTiff",
         "width": grid.width,
         "height": grid.height,
         "count": 1,
         "dtype": "uint8",
+        "nodata": NODATA,
         "crs": rasterio.crs.CRS.from_epsg(EPSG),
         "transform": grid.transform,
         "tiled": True,
@@ -708,6 +720,57 @@ def write_cog(path: Path, classes: np.ndarray, grid: Grid, tags: dict[str, str])
             src, out, driver="COG", COMPRESS="DEFLATE", BLOCKSIZE="512", OVERVIEWS="AUTO", RESAMPLING="NEAREST"
         )
     return path
+
+
+def cog_tags(
+    *,
+    offset: float,
+    pre: Sequence[dict[str, Any]],
+    post: Sequence[dict[str, Any]],
+    tiles: Sequence[str],
+    aoi_sha256: str,
+) -> dict[str, str]:
+    """The COG's ``TESSERA_APPS_*`` tags: source, codes, thresholds, offset, scenes, windows, grid inputs.
+
+    Only what the map is made from goes in, never the time it was made, so the same products give
+    the same tags (and the same COG bytes).
+
+    Args:
+        offset: The dNBR offset subtracted (median over unburned land).
+        pre: The pre-fire period's scene records (:func:`compose_period`).
+        post: The post-fire period's scene records.
+        tiles: The MGRS tiles read.
+        aoi_sha256: sha256 of the bundled ``caldor.geojson``.
+    """
+    windows = {r["scene"]: r["window"] for r in (*pre, *post) if r["window"] is not None}
+    return {
+        "TESSERA_APPS_SOURCE": SOURCE_TAG,
+        "TESSERA_APPS_CODES": json.dumps(CLASS_NAMES),
+        "TESSERA_APPS_NODATA": f"{NODATA}: outside the AOI, not mapped",
+        "TESSERA_APPS_THRESHOLDS": json.dumps(
+            {**THRESHOLDS, "scale": "round(1000 * dNBR)", "method": "Key and Benson"}
+        ),
+        "TESSERA_APPS_DNBR_OFFSET": f"{offset:.6f}",
+        "TESSERA_APPS_OFFSET_REGION": (
+            "median dNBR of AOI pixels outside caldor.geojson feature 1 (Hansen 2021 loss outline) buffered by "
+            f"{UNBURNED_BUFFER_M:.0f} m"
+        ),
+        "TESSERA_APPS_PRE_PERIOD": f"{PRE[0]}/{PRE[1]}",
+        "TESSERA_APPS_POST_PERIOD": f"{POST[0]}/{POST[1]}",
+        "TESSERA_APPS_PRE_SCENES": json.dumps([r["scene"] for r in pre if r["window"] is not None]),
+        "TESSERA_APPS_POST_SCENES": json.dumps([r["scene"] for r in post if r["window"] is not None]),
+        "TESSERA_APPS_WINDOWS": json.dumps(windows),
+        "TESSERA_APPS_TILES": ",".join(tiles),
+        "TESSERA_APPS_SCL_CLEAR": ",".join(str(c) for c in SCL_CLEAR),
+        "TESSERA_APPS_NBR": "median over dates of (B8A - B12) / (B8A + B12) on clear pixels, per period",
+        "TESSERA_APPS_REFLECTANCE": (
+            "DN * 1e-4, minus 0.1 when processing baseline >= 04.00 and the clear-pixel B12 1st percentile is at least "
+            "1000 DN (the item's earthsearch:boa_offset_applied flag is wrong in this bucket)"
+        ),
+        "TESSERA_APPS_AOI": f"caldor.geojson feature 0 (sha256 {aoi_sha256})",
+        "TESSERA_APPS_BUCKET": f"{BUCKET}/{PREFIX}",
+        "TESSERA_APPS_SCRIPT": "scripts/make_caldor_dnbr.py",
+    }
 
 
 def _stats(values: np.ndarray) -> dict[str, float | int | None]:
@@ -770,35 +833,9 @@ def main() -> None:
     del dnbr_raw
 
     aoi_sha = hashlib.sha256(files("tessera_apps.data").joinpath("caldor.geojson").read_bytes()).hexdigest()
-    windows = {r["scene"]: r["window"] for p in periods.values() for r in p.records if r["window"] is not None}
-    tags = {
-        "TESSERA_APPS_SOURCE": SOURCE_TAG,
-        "TESSERA_APPS_CODES": json.dumps(CLASS_NAMES),
-        "TESSERA_APPS_THRESHOLDS": json.dumps(
-            {**THRESHOLDS, "scale": "round(1000 * dNBR)", "method": "Key and Benson"}
-        ),
-        "TESSERA_APPS_DNBR_OFFSET": f"{offset:.6f}",
-        "TESSERA_APPS_OFFSET_REGION": (
-            "median dNBR of AOI pixels outside caldor.geojson feature 1 (Hansen 2021 loss outline) buffered by "
-            f"{UNBURNED_BUFFER_M:.0f} m"
-        ),
-        "TESSERA_APPS_PRE_PERIOD": f"{PRE[0]}/{PRE[1]}",
-        "TESSERA_APPS_POST_PERIOD": f"{POST[0]}/{POST[1]}",
-        "TESSERA_APPS_PRE_SCENES": json.dumps([r["scene"] for r in pre.records if r["window"] is not None]),
-        "TESSERA_APPS_POST_SCENES": json.dumps([r["scene"] for r in post.records if r["window"] is not None]),
-        "TESSERA_APPS_WINDOWS": json.dumps(windows),
-        "TESSERA_APPS_TILES": ",".join(name for name, _ in tiles),
-        "TESSERA_APPS_SCL_CLEAR": ",".join(str(c) for c in SCL_CLEAR),
-        "TESSERA_APPS_NBR": "median over dates of (B8A - B12) / (B8A + B12) on clear pixels, per period",
-        "TESSERA_APPS_REFLECTANCE": (
-            "DN * 1e-4, minus 0.1 when processing baseline >= 04.00 and the clear-pixel B12 1st percentile is at least "
-            "1000 DN (the item's earthsearch:boa_offset_applied flag is wrong in this bucket)"
-        ),
-        "TESSERA_APPS_AOI": f"caldor.geojson feature 0 (sha256 {aoi_sha})",
-        "TESSERA_APPS_BUCKET": f"{BUCKET}/{PREFIX}",
-        "TESSERA_APPS_CREATED": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
-        "TESSERA_APPS_SCRIPT": "scripts/make_caldor_dnbr.py",
-    }
+    tags = cog_tags(
+        offset=offset, pre=pre.records, post=post.records, tiles=[name for name, _ in tiles], aoi_sha256=aoi_sha
+    )
     write_cog(out, classes, grid, tags)
 
     seconds = time.perf_counter() - t0
@@ -816,6 +853,11 @@ def main() -> None:
     record = {
         "file": out.name,
         "sha256": export.file_sha256(out),
+        "sha256_note": (
+            "The COG holds no creation time, so this hash identifies its content: a rerun on the same products "
+            "gives the same file."
+        ),
+        "created_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "tags": tags,
         "grid": {"epsg": EPSG, "res_m": RES, "bounds": grid.bounds, "shape": grid.shape},
         "aoi_hectares": round(float(aoi.sum()) * PIXEL_HA, 2),

@@ -9,9 +9,13 @@ validation and the mismatch count can be checked against exact expectations.
 
 from __future__ import annotations
 
+import datetime as dt
+import importlib.util
 import json
 import math
 import re
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +32,7 @@ from zarr.storage import MemoryStore
 from tessera_apps import export, metrics, validate
 from tessera_apps.apps import _common
 from tessera_apps.apps import wildfire as wf
-from tessera_apps.apps._common import AppInputError
+from tessera_apps.apps._common import AppInputError, StrictValidationError
 from tessera_apps.apps.wildfire import (
     MAX_VALLEY_RATIO,
     WildfireError,
@@ -42,7 +46,7 @@ from tessera_apps.apps.wildfire import (
     select_threshold,
     valley_ratio,
 )
-from tessera_apps.cli import EXIT_USAGE, app
+from tessera_apps.cli import EXIT_USAGE, EXIT_VALIDATION, app
 from tessera_apps.demo import demo_feature
 from tessera_apps.io import FIRST_YEAR, YEARS, TesseraReader, YearsNotPublishedError, plan_aoi, zone_epsg
 
@@ -751,31 +755,35 @@ def test_multi_zone_validation_is_redone_close_to_a_full_run(scar_store, scar_ru
 # --------------------------------------------------------------------------------------------
 
 #: Pixels of each code laid out in every zone of the boundary plan, and how many of them are burned.
-LAYOUT = {1: (70, 7), 2: (60, 12), 3: (50, 25), 4: (40, 36), 5: (30, 3), 6: (20, 4)}
-#: Class 3 pixels left unclassified (never burned), and class 0 pixels burned and unclassified.
-UNCLASSIFIED_3 = 10
-BURNED_0 = 5
-UNCLASSIFIED_0 = 2
+#: Background (0) is mapped land outside the burn; the rest of the AOI is not covered by the map.
+LAYOUT = {1: (70, 7), 2: (60, 12), 3: (50, 25), 4: (40, 36), 5: (30, 3), 6: (20, 4), 0: (40, 5)}
+#: Pixels of each code left unclassified: the last of their run, never burned.
+UNCLASSIFIED = {0: 3, 1: 6, 3: 10, 5: 4, 6: 2}
+#: AOI pixels after the laid-out runs are not covered by the map: the first are burned, the last unclassified.
+BURNED_UNMAPPED = 5
+UNCLASSIFIED_UNMAPPED = 2
+UNMAPPED = wf.SEVERITY_UNMAPPED
 
 
-def _laid_out(plan):
-    """Severity, burned and classified masks per zone with the known counts of LAYOUT."""
+def _laid_out(plan, layout=LAYOUT, unclassified=UNCLASSIFIED):
+    """Severity, burned and classified masks per zone with the known counts of ``layout``."""
     severity, burned, classified = {}, {}, {}
     for z in plan.zones:
         rr, cc = np.nonzero(z.mask)
-        s = np.zeros(z.shape, dtype=np.uint8)
+        assert len(rr) > sum(n for n, _ in layout.values()) + BURNED_UNMAPPED + UNCLASSIFIED_UNMAPPED
+        s = np.full(z.shape, UNMAPPED, dtype=np.uint8)
         b = np.zeros(z.shape, dtype=bool)
         v = z.mask.copy()
         start = 0
-        for code, (n, n_burned) in LAYOUT.items():
+        for code, (n, n_burned) in layout.items():
+            k = unclassified.get(code, 0)
+            assert n_burned + k <= n
             s[rr[start : start + n], cc[start : start + n]] = code
-            # The unclassified class 3 pixels come last in their run and are never burned.
             b[rr[start : start + n_burned], cc[start : start + n_burned]] = True
-            if code == 3:
-                v[rr[start + n - UNCLASSIFIED_3 : start + n], cc[start + n - UNCLASSIFIED_3 : start + n]] = False
+            v[rr[start + n - k : start + n], cc[start + n - k : start + n]] = False
             start += n
-        b[rr[start : start + BURNED_0], cc[start : start + BURNED_0]] = True  # burned on background (class 0)
-        v[rr[len(rr) - UNCLASSIFIED_0 :], cc[len(rr) - UNCLASSIFIED_0 :]] = False
+        b[rr[start : start + BURNED_UNMAPPED], cc[start : start + BURNED_UNMAPPED]] = True
+        v[rr[len(rr) - UNCLASSIFIED_UNMAPPED :], cc[len(rr) - UNCLASSIFIED_UNMAPPED :]] = False
         # Outside the AOI mask nothing counts, whatever the arrays hold.
         s[~z.mask] = 4
         b[~z.mask] = True
@@ -796,78 +804,140 @@ def test_severity_scores_count_every_class_and_merge_zones(boundary_plan):
     sc = wf.score_against_severity(plan, burned, severity, classified)
     assert sc["min_class"] == 3 and sc["min_class_name"] == "moderate"
     zones = len(plan.zones)
-    px = {c: n * zones for c, (n, _) in LAYOUT.items()}
+    px = {c: (n - UNCLASSIFIED.get(c, 0)) * zones for c, (n, _) in LAYOUT.items()}
     hit = {c: k * zones for c, (_, k) in LAYOUT.items()}
-    px[3] -= UNCLASSIFIED_3 * zones
-    assert set(sc["classes"]) == {"1", "2", "3", "4", "5"}
-    for c in (1, 2, 3, 4, 5):
+    assert set(sc["classes"]) == {"0", "1", "2", "3", "4", "5"}
+    for c in (0, 1, 2, 3, 4, 5):
         row = sc["classes"][str(c)]
         assert (row["pixels"], row["detected_pixels"]) == (px[c], hit[c]), c
         assert row["detection_rate"] == pytest.approx(hit[c] / px[c])
         assert row["hectares"] == pytest.approx(px[c] * 0.01)
         assert row["detected_hectares"] == pytest.approx(hit[c] * 0.01)
-    # Moderate or worse, over classified pixels in classes 1 to 5: class 5 is unburned land.
+    # Moderate or worse, over classified mapped pixels in classes 0 to 5: background (0, outside the
+    # mapped burn) and increased greenness (5) are unburned land, so detections there are false positives.
     m = sc["min_class_or_worse"]
     ref = px[3] + px[4]
     tp = hit[3] + hit[4]
-    fp = hit[1] + hit[2] + hit[5]
+    fp = hit[0] + hit[1] + hit[2] + hit[5]
     assert (m.tp, m.fn, m.fp) == (tp, ref - tp, fp)
-    assert m.n == sum(px[c] for c in (1, 2, 3, 4, 5)) == sc["pixels_scored"]
+    assert m.n == sum(px[c] for c in (0, 1, 2, 3, 4, 5)) == sc["pixels_scored"]
     assert m.iou == pytest.approx(tp / (tp + fp + ref - tp))
+    assert sc["moderate_or_worse"] == m
     low = sc["low_or_worse"]
     ref_low = px[2] + px[3] + px[4]
     tp_low = hit[2] + hit[3] + hit[4]
-    assert (low.tp, low.fn, low.fp, low.n) == (tp_low, ref_low - tp_low, hit[1] + hit[5], m.n)
+    assert (low.tp, low.fn, low.fp, low.n) == (tp_low, ref_low - tp_low, hit[0] + hit[1] + hit[5], m.n)
     # Zones are merged by summing counts.
-    for key in ("min_class_or_worse", "low_or_worse"):
+    for key in ("min_class_or_worse", "moderate_or_worse", "low_or_worse"):
         parts = sc["per_zone"][key]
         assert set(parts) == {"10N", "11N"}
         assert validate.merge_scores(list(parts.values())) == sc[key]
         assert all(p.n == m.n // zones for p in parts.values())
-    # Classes 0 and 6 are excluded and counted.
+    # Pixels the map does not cover and class 6 are excluded and counted.
     n_classified = sum(int(classified[z.zone].sum()) for z in plan.zones)
-    assert sc["excluded"]["non_processing_pixels"] == px[6]
-    assert sc["excluded"]["background_pixels"] == n_classified - m.n - px[6]
-    assert sc["unclassified_pixels_in_classes_1_to_5"] == UNCLASSIFIED_3 * zones
-    # Where the detections fall: every burned AOI pixel the app classified, classes 0 and 6 too.
+    unmapped = sum(int(z.mask.sum()) - sum(n for n, _ in LAYOUT.values()) - UNCLASSIFIED_UNMAPPED for z in plan.zones)
+    assert sc["excluded"] == {"unmapped_pixels": unmapped, "non_processing_pixels": px[6]}
+    assert n_classified == m.n + px[6] + unmapped
+    assert sc["unclassified_pixels_in_classes_1_to_5"] == (6 + 10 + 4) * zones
+    # Where the detections fall: every burned AOI pixel the app classified, unmapped and class 6 too.
     by_class = sc["detections_by_class"]
-    n_burned = sum(hit.values()) + BURNED_0 * zones
+    n_burned = sum(hit.values()) + BURNED_UNMAPPED * zones
     assert sc["burned_pixels"] == n_burned
-    assert by_class["0"]["pixels"] == BURNED_0 * zones
-    for c in (1, 2, 3, 4, 5, 6):
+    assert set(by_class) == {"0", "1", "2", "3", "4", "5", "6", "unmapped"}
+    assert by_class["unmapped"]["pixels"] == BURNED_UNMAPPED * zones
+    for c in (0, 1, 2, 3, 4, 5, 6):
         assert by_class[str(c)]["pixels"] == hit[c]
         assert by_class[str(c)]["share"] == pytest.approx(hit[c] / n_burned)
     assert sum(v["share"] for v in by_class.values()) == pytest.approx(1.0)
-    assert sc["iou_below_0_6"] is (m.iou < 0.6)
+    assert sc["stop_rule_min_class"] == 3 and sc["iou_below_0_6"] is (m.iou < 0.6)
 
 
-def test_severity_min_class_switch_and_class_5_is_never_burned(boundary_plan):
+def test_severity_min_class_switch_and_classes_0_and_5_are_never_burned(boundary_plan):
     plan = boundary_plan
     severity, burned, classified = _laid_out(plan)
     zones = len(plan.zones)
-    high = wf.score_against_severity(plan, burned, severity, classified, min_class=4)["min_class_or_worse"]
-    assert (high.tp, high.fn) == (36 * zones, 4 * zones)
-    assert high.fp == (7 + 12 + 25 + 3) * zones
+    default = wf.score_against_severity(plan, burned, severity, classified)
+    high = wf.score_against_severity(plan, burned, severity, classified, min_class=4)
+    m = high["min_class_or_worse"]
+    assert (m.tp, m.fn) == (36 * zones, 4 * zones)
+    assert m.fp == (5 + 7 + 12 + 25 + 3) * zones
     low = wf.score_against_severity(plan, burned, severity, classified, min_class=2)
     assert low["min_class_or_worse"] == low["low_or_worse"]
+    # Moderate or worse does not move with the min class.
+    assert high["moderate_or_worse"] == low["moderate_or_worse"] == default["min_class_or_worse"]
     every = wf.score_against_severity(plan, burned, severity, classified, min_class=1)["min_class_or_worse"]
-    # Classes 1 to 4 are burned; increased greenness (5) stays unburned even then.
-    assert every.tp == (7 + 12 + 25 + 36) * zones and every.fp == 3 * zones
+    # Classes 1 to 4 are burned; background (0) and increased greenness (5) stay unburned even then.
+    assert every.tp == (7 + 12 + 25 + 36) * zones and every.fp == (5 + 3) * zones
     assert wf.severity_burned(np.arange(7), 3).tolist() == [False, False, False, True, True, False, False]
+    assert not wf.severity_burned(np.array([UNMAPPED]), 1).any()
     for bad in (0, 5, 3.0, True):
         with pytest.raises(AppInputError, match="severity_min_class"):
             wf.score_against_severity(plan, burned, severity, classified, min_class=bad)
 
 
+def _stop_view(plan, layout, min_class):
+    severity, burned, classified = _laid_out(plan, layout, unclassified={})
+    sc = wf.score_against_severity(plan, burned, severity, classified, min_class=min_class)
+    info = {"file": "s.tif", "sha256": "0" * 64, "proxy": False, "source_tag": None, "nodata": None}
+    none = {z.zone: np.zeros(z.shape, dtype=bool) for z in plan.zones}
+    validation = {"severity": wf._severity_summary(sc, info, severity, none)}
+    return sc, wf._severity_caveats(info, sc), wf.stop_rule(validation), wf.headline(validation)
+
+
+def test_the_stop_rule_reads_moderate_or_worse_whatever_the_min_class(boundary_plan):
+    # The app finds every moderate and high pixel and nothing else: IoU 1 against moderate or worse,
+    # 0.5 against low or worse (half the reference missed) and against high (as many false positives).
+    only_moderate = {3: (50, 50), 4: (50, 50), 2: (100, 0), 1: (100, 0)}
+    for k in (2, 3, 4):
+        sc, caveats, rule, head = _stop_view(boundary_plan, only_moderate, k)
+        assert sc["moderate_or_worse"].iou == 1.0 and sc["low_or_worse"].iou == 0.5, k
+        assert sc["min_class_or_worse"].iou == (1.0 if k == 3 else 0.5), k
+        assert rule == {"basis": "severity", "min_class": 3, "iou": 1.0, "below_0_6": False}, k
+        assert sc["iou_below_0_6"] is False and not any("stop-and-report" in c for c in caveats), k
+        assert ("the stop rule reads IoU 1.000 against moderate or worse" in head["text"]) is (k != 3), k
+    # The app also finds the low pixels: IoU 1 against low or worse, 0.5 against moderate or worse,
+    # which trips the rule even when the min class is low.
+    with_low = {3: (50, 50), 4: (50, 50), 2: (100, 100), 1: (100, 0)}
+    for k in (2, 3):
+        sc, caveats, rule, _ = _stop_view(boundary_plan, with_low, k)
+        assert sc["low_or_worse"].iou == 1.0 and sc["moderate_or_worse"].iou == 0.5, k
+        assert rule == {"basis": "severity", "min_class": 3, "iou": 0.5, "below_0_6": True}, k
+        assert sc["iou_below_0_6"] is True, k
+        assert any("stop-and-report" in c and "severity class 3 (moderate)" in c for c in caveats), k
+
+
+def test_the_recovery_reference_burned_fraction_counts_burned_classes_only(boundary_plan):
+    plan = boundary_plan
+    severity, burned, classified = _laid_out(plan)
+    sc = wf.score_against_severity(plan, burned, severity, classified, min_class=3)
+    # Ten reference pixels in each of 0, 1, 3, 4, 5, 6 and unmapped, per zone.
+    reference, s = {}, {}
+    for z in plan.zones:
+        rr, cc = np.nonzero(z.mask)
+        codes = np.full(z.shape, UNMAPPED, dtype=np.uint8)
+        ref = np.zeros(z.shape, dtype=bool)
+        for i, code in enumerate((0, 1, 3, 4, 5, 6, UNMAPPED)):
+            codes[rr[10 * i : 10 * i + 10], cc[10 * i : 10 * i + 10]] = code
+            ref[rr[10 * i : 10 * i + 10], cc[10 * i : 10 * i + 10]] = True
+        reference[z.zone], s[z.zone] = ref, codes
+    info = {"file": "s.tif", "sha256": "0" * 64}
+    assert wf._severity_summary(sc, info, s, reference)["recovery_reference_burned_fraction"] == pytest.approx(2 / 7)
+    sc1 = wf.score_against_severity(plan, burned, severity, classified, min_class=1)
+    assert wf._severity_summary(sc1, info, s, reference)["recovery_reference_burned_fraction"] == pytest.approx(3 / 7)
+
+
 def test_severity_with_nothing_scored_has_no_ratios(boundary_plan):
     plan = boundary_plan
-    zeros = {z.zone: np.zeros(z.shape, dtype=np.uint8) for z in plan.zones}
-    none = {z.zone: np.zeros(z.shape, dtype=bool) for z in plan.zones}
-    sc = wf.score_against_severity(plan, none, zeros, none)
-    assert sc["pixels_scored"] == 0 and sc["burned_pixels"] == 0
-    assert sc["min_class_or_worse"].iou is None and sc["iou_below_0_6"] is False
-    assert all(row["detection_rate"] is None for row in sc["classes"].values())
-    assert all(v["share"] is None for v in sc["detections_by_class"].values())
+    for fill in (0, UNMAPPED):
+        codes = {z.zone: np.full(z.shape, fill, dtype=np.uint8) for z in plan.zones}
+        none = {z.zone: np.zeros(z.shape, dtype=bool) for z in plan.zones}
+        sc = wf.score_against_severity(plan, none, codes, none)
+        assert sc["pixels_scored"] == 0 and sc["burned_pixels"] == 0
+        assert sc["min_class_or_worse"].iou is None and sc["iou_below_0_6"] is False
+        assert all(row["detection_rate"] is None for row in sc["classes"].values())
+        assert all(v["share"] is None for v in sc["detections_by_class"].values())
+    with pytest.raises(ValueError, match="Severity codes"):
+        wf.score_against_severity(plan, none, {z.zone: np.full(z.shape, 7, dtype=np.uint8) for z in plan.zones}, none)
 
 
 # The caldor fixture: synthetic severity rasters on its 10 m grid.
@@ -925,10 +995,21 @@ def _blocks(n: int) -> np.ndarray:
     return s
 
 
+#: Columns of the block map on its nodata (255): the map does not cover them.
+NODATA_COLUMNS = slice(40, 46)
+
+
+def _block_map(n: int) -> np.ndarray:
+    """:func:`_blocks` with :data:`NODATA_COLUMNS` on nodata 255."""
+    s = _blocks(n)
+    s[:, NODATA_COLUMNS] = 255
+    return s
+
+
 @pytest.fixture
 def block_severity(caldor_fixture, tmp_path) -> Path:
     transform, n, epsg = _fixture_grid(caldor_fixture)
-    return _write_raster(tmp_path / "blocks_dnbr6.tif", _blocks(n), transform, epsg)
+    return _write_raster(tmp_path / "blocks_dnbr6.tif", _block_map(n), transform, epsg, nodata=255)
 
 
 SEVERITY_KW = {"min_area_ha": 0.05, "block": (32, 32)}
@@ -944,7 +1025,7 @@ def _on_output_grid(tif: Path, fx, severity: np.ndarray) -> tuple[np.ndarray, np
     rr, cc = np.mgrid[0 : flags.shape[0], 0 : flags.shape[1]]
     rr, cc = rr + dr, cc + dc
     inside = (rr >= 0) & (rr < n) & (cc >= 0) & (cc < n)
-    codes = np.zeros(flags.shape, dtype=np.uint8)
+    codes = np.full(flags.shape, UNMAPPED, dtype=np.uint8)
     codes[inside] = severity[rr[inside], cc[inside]]
     return flags, codes
 
@@ -959,47 +1040,89 @@ def test_severity_run_scores_each_class_on_the_fixture(
     assert result.validation_written
     val = json.loads(result.paths.validation.read_text())
     assert set(val["scores"]) == {"severity"} and set(val["reference"]) == {"severity"}
+    assert val["reference"]["severity"]["nodata"] == 255
     sev = val["scores"]["severity"]
-    flags, codes = _on_output_grid(result.paths.tif, caldor_fixture, _blocks(caldor_fixture["scales"].shape[1]))
+    flags, codes = _on_output_grid(result.paths.tif, caldor_fixture, _block_map(caldor_fixture["scales"].shape[1]))
     classified = np.isfinite(flags)
     burned = flags == 1
+    mapped = codes != UNMAPPED
     assert burned.sum() > 100 and (~burned & classified).sum() > 100, "the fixture is about half burned"
-    for c in (1, 2, 3, 4, 5):
+    for c in (0, 1, 2, 3, 4, 5):
         here = classified & (codes == c)
         row = sev["classes"][str(c)]
         assert row["pixels"] == int(here.sum()) > 0
         assert row["detected_pixels"] == int((here & burned).sum())
         assert row["detection_rate"] == pytest.approx(float(burned[here].mean()))
-    scored = classified & (codes >= 1) & (codes <= 5)
+    # Background (the band on top) is scored as unburned land; the nodata columns and class 6 are not scored.
+    scored = classified & mapped & (codes <= 5)
     ref = scored & ((codes == 3) | (codes == 4))
     tp = int((burned & ref).sum())
     fp = int((burned & scored & ~ref).sum())
     fn = int((~burned & ref).sum())
     m = sev["min_class_or_worse"]
     assert (m["tp"], m["fp"], m["fn"], m["n"]) == (tp, fp, fn, int(scored.sum()))
+    assert int((burned & scored & (codes == 0)).sum()) > 0, "detections on background count as false positives"
     assert sev["excluded"]["non_processing_pixels"] == int((classified & (codes == 6)).sum()) > 0
-    assert sev["excluded"]["background_pixels"] == int((classified & (codes == 0)).sum()) > 0
+    assert sev["excluded"]["unmapped_pixels"] == int((classified & ~mapped).sum()) > 0
+    assert sev["excluded"]["unmapped_pixels"] != sev["excluded"]["non_processing_pixels"]
     assert sev["detections_by_class"]["0"]["pixels"] == int((burned & (codes == 0)).sum()) > 0
-    # The summary carries the compact view and the headline puts the severity IoU first.
+    assert sev["detections_by_class"]["unmapped"]["pixels"] == int((burned & ~mapped).sum())
+    # The summary carries the compact view, number for number, and the headline puts the severity IoU first.
     s = result.summary
-    assert s["validation"]["severity"]["iou"] == pytest.approx(tp / (tp + fp + fn))
-    assert s["validation"]["severity"]["proxy"] is False
-    assert s["validation"]["stop_rule"]["basis"] == "severity"
+    view = s["validation"]["severity"]
+    assert view["iou"] == pytest.approx(tp / (tp + fp + fn))
+    for key in ("iou", "precision", "recall", "f1"):
+        assert view[key] == sev["min_class_or_worse"][key], key
+    for block in ("moderate_or_worse", "low_or_worse"):
+        assert view[block] == {k: sev[block][k] for k in ("iou", "precision", "recall", "f1")}, block
+    assert view["low_or_worse"] != view["moderate_or_worse"]
+    assert view["pixels_scored"] == sev["pixels_scored"] == m["n"]
+    assert view["excluded"] == sev["excluded"]
+    assert set(view["detections_by_class"]) == {"0", "1", "2", "3", "4", "5", "6", "unmapped"}
+    for c, share in view["detections_by_class"].items():
+        assert share == sev["detections_by_class"][c]["share"], c
+    assert view["detection_rate_by_class"] == {c: row["detection_rate"] for c, row in sev["classes"].items()}
+    assert view["iou_below_0_6"] is sev["iou_below_0_6"] is (sev["moderate_or_worse"]["iou"] < 0.6)
+    assert view["proxy"] is False
+    assert s["validation"]["stop_rule"] == {
+        "basis": "severity",
+        "min_class": 3,
+        "iou": sev["moderate_or_worse"]["iou"],
+        "below_0_6": sev["iou_below_0_6"],
+    }
     head = s["headline"]
     assert head["basis"] == "severity" and head["order"] == ["severity_iou", "detection_rate_by_class"]
-    assert head["severity_iou"] == s["validation"]["severity"]["iou"]
+    assert head["severity_iou"] == view["iou"]
     assert head["text"].startswith("Severity (severity map): IoU")
     assert "high" in head["text"] and "increased greenness" in head["text"]
     assert result.report["params"]["severity"]["file"] == block_severity.name
     # The caveats say what the severity scores can show, and this map is not the proxy.
     assert any("per fire" in c for c in val["caveats"]) and any("blocky" in c for c in val["caveats"])
-    assert any("excluded" in c for c in val["caveats"])
+    assert any("excluded" in c and "false positives" in c for c in val["caveats"])
     assert not any("sentinel2_dnbr" in c for c in val["caveats"])
-    # A rerun with the same severity map skips; another min class reruns.
+    assert not any("declares 0 as its nodata" in c for c in val["caveats"])
+    # A rerun with the same severity map skips; another min class reruns, and the stop rule stays put.
     assert run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw).skipped
     moved = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw, severity_min_class=4)
     assert not moved.skipped
     assert moved.summary["validation"]["severity"]["min_class"] == 4
+    assert moved.summary["validation"]["severity"]["iou"] != view["iou"]
+    assert moved.summary["validation"]["stop_rule"] == s["validation"]["stop_rule"]
+
+
+def test_a_severity_file_whose_nodata_is_0_cannot_score_its_background(
+    caldor_reader, caldor_fixture, fixture_aoi, tmp_path
+):
+    aoi_path, _ = fixture_aoi
+    transform, n, epsg = _fixture_grid(caldor_fixture)
+    path = _write_raster(tmp_path / "zero_nodata.tif", _blocks(n), transform, epsg, nodata=0)
+    result = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", reader=caldor_reader, severity=path, **SEVERITY_KW)
+    val = json.loads(result.paths.validation.read_text())
+    sev = val["scores"]["severity"]
+    flags, codes = _on_output_grid(result.paths.tif, caldor_fixture, _blocks(n))
+    assert sev["classes"]["0"]["pixels"] == 0
+    assert sev["excluded"]["unmapped_pixels"] == int((np.isfinite(flags) & (codes == 0)).sum()) > 0
+    assert any("declares 0 as its nodata" in c for c in val["caveats"])
 
 
 def test_load_severity_reads_any_crs_with_nearest(caldor_reader, fixture_aoi, tmp_path):
@@ -1017,7 +1140,7 @@ def test_load_severity_reads_any_crs_with_nearest(caldor_reader, fixture_aoi, tm
     classes, info = wf.load_severity(plan, _write_raster(tmp_path / "ll.tif", data, t, 4326))
     got = classes[z.zone]
     assert got.dtype == np.uint8 and got.shape == z.shape
-    assert (got[~z.mask] == 0).all() and set(np.unique(got[z.mask]).tolist()) == {2, 4}
+    assert (got[~z.mask] == UNMAPPED).all() and set(np.unique(got[z.mask]).tolist()) == {2, 4}
     rows, cols = np.nonzero(z.mask)
     x = z.transform.c + (cols + 0.5) * 10.0
     y = z.transform.f - (rows + 0.5) * 10.0
@@ -1026,6 +1149,35 @@ def test_load_severity_reads_any_crs_with_nearest(caldor_reader, fixture_aoi, tm
     assert (got[rows, cols][far] == np.where(lon < mid, 4, 2)[far]).all()
     assert info["file"] == "ll.tif" and info["proxy"] is False and info["source_tag"] is None
     assert info["crs"] == "EPSG:4326" and info["sha256"] == export.file_sha256(tmp_path / "ll.tif")
+    assert info["nodata"] is None
+
+
+def test_load_severity_checks_the_codes_over_the_aoi_only(caldor_reader, caldor_fixture, tmp_path):
+    transform, n, epsg = _fixture_grid(caldor_fixture)
+    a, c, f = transform.a, transform.c, transform.f
+    # A triangle AOI: the far corner of its plan window lies outside it.
+    tri = shapely.Polygon([(c + 5 * a, f - 5 * a), (c + (n - 5) * a, f - 5 * a), (c + 5 * a, f - (n - 5) * a)])
+    to_ll = Transformer.from_crs(epsg, 4326, always_xy=True)
+    plan = plan_aoi(caldor_reader, shapely.transform(shapely.segmentize(tri, 10.0), to_ll.transform, interleaved=False))
+    (z,) = plan.zones
+    # Fixture-grid pixel (row, col) of plan pixel (0, 0).
+    r0, c0 = round((f - z.transform.f) / a), round((z.transform.c - c) / a)
+    corner = np.argwhere(~z.mask)
+    corner = corner[np.argmax(corner.sum(axis=1))]
+    inside = np.argwhere(z.mask)[0]
+    outside = _blocks(n)
+    outside[corner[0] + r0, corner[1] + c0] = 255
+    classes, info = wf.load_severity(plan, _write_raster(tmp_path / "fill_outside.tif", outside, transform, epsg))
+    assert classes[z.zone][tuple(corner)] == UNMAPPED and info["nodata"] is None
+    within = _blocks(n)
+    within[inside[0] + r0, inside[1] + c0] = 255
+    path = _write_raster(tmp_path / "fill_inside.tif", within, transform, epsg)
+    with pytest.raises(AppInputError, match=re.escape("codes 0 to 6 (255) over the AOI")):
+        wf.load_severity(plan, path)
+    # Declared as nodata, the same fill value is simply not mapped.
+    path = _write_raster(tmp_path / "fill_nodata.tif", within, transform, epsg, nodata=255)
+    classes, info = wf.load_severity(plan, path)
+    assert classes[z.zone][tuple(inside)] == UNMAPPED and info["nodata"] == 255
 
 
 def test_severity_errors_name_the_file_before_any_chunk_read(
@@ -1056,6 +1208,46 @@ def test_severity_errors_name_the_file_before_any_chunk_read(
         assert str(path) in str(info.value), name
         assert log.chunk_keys() == [], name
     assert not (out / "wildfire_report.json").exists()
+
+
+def _unreachable(*args, **kwargs):
+    raise validate.ReferenceUnavailableError("services3.arcgis.com refused the request (403)")
+
+
+def _nine(fx, tmp_path: Path) -> Path:
+    """A block map with one value outside the dnbr6 codes, 9, inside the fixture AOI."""
+    transform, n, epsg = _fixture_grid(fx)
+    bad = _blocks(n)
+    bad[20, 20] = 9
+    return _write_raster(tmp_path / "nine.tif", bad, transform, epsg)
+
+
+def test_a_bad_severity_file_is_named_before_a_strict_unreachable_outline(
+    cli_wildfire_reader, caldor_store, caldor_fixture, fixture_aoi, tmp_path, monkeypatch
+):
+    # The severity map is loaded first, so a bad file is a usage error naming it (exit 2), not the
+    # strict validation failure the unreachable outline would give (exit 3).
+    _, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    path = _nine(caldor_fixture, tmp_path)
+    with pytest.raises(AppInputError, match=re.escape(str(path))):
+        run_wildfire(
+            aoi_path,
+            2020,
+            2022,
+            tmp_path / "out",
+            reader=cli_wildfire_reader,
+            validate=True,
+            strict_validate=True,
+            severity=path,
+            **SEVERITY_KW,
+        )
+    assert log.chunk_keys() == []
+    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path / "o")]
+    result = CliRunner().invoke(app, [*args, "--validate", "--strict-validate", "--severity", str(path)])
+    assert result.exit_code == EXIT_USAGE and "nine.tif" in result.stderr, result.output
+    assert log.chunk_keys() == []
 
 
 def test_severity_arguments_fail_before_the_store_opens(no_store, tmp_path):
@@ -1135,7 +1327,9 @@ def test_severity_sets_the_stop_rule_and_comes_first(caldor_reader, fixture_aoi,
     inv = _write_raster(tmp_path / "inv.tif", inverted, t, crs)
     bad = run_wildfire(aoi_path, 2020, 2022, tmp_path / "bad", severity=inv, **kw)
     assert bad.summary["validation"]["severity"]["iou"] == 0.0
-    assert any("against severity class 3 (moderate) or worse" in w for w in bad.report["warnings"])
+    assert [w for w in bad.report["warnings"] if w.endswith(wf.STOP_WARNING)] == [
+        "IoU 0.000 against severity class 3 (moderate) or worse is below 0.6: stop and report (brief section 8)."
+    ]
     caveats = json.loads(bad.paths.validation.read_text())["caveats"]
     assert any("stop-and-report" in c and "severity class 3" in c for c in caveats)
 
@@ -1145,11 +1339,7 @@ def test_severity_survives_an_unreachable_outline_and_the_rerun_retries(
 ):
     _, log = caldor_store
     aoi_path, aoi = fixture_aoi
-
-    def unreachable(*args, **kwargs):
-        raise validate.ReferenceUnavailableError("services3.arcgis.com refused the request (403)")
-
-    monkeypatch.setattr(validate, "nifc_perimeters", unreachable)
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
     kw = {**SEVERITY_KW, "reader": caldor_reader, "validate": True, "severity": block_severity}
     first = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw)
     # The severity scores are written; the report does not vouch for the file, since the outline is missing.
@@ -1160,6 +1350,9 @@ def test_severity_survives_an_unreachable_outline_and_the_rerun_retries(
     s = first.summary["validation"]
     assert "services3.arcgis.com" in s["error"] and s["severity"]["iou"] is not None
     assert first.summary["headline"]["basis"] == "severity"
+    # This map trips the stop rule, so the first run warns once.
+    assert s["stop_rule"]["below_0_6"] is True
+    assert sum(w.endswith(wf.STOP_WARNING) for w in first.report["warnings"]) == 1
     reads = len(log.chunk_keys())
     # Still unreachable: nothing is read or redone.
     again = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw)
@@ -1173,7 +1366,70 @@ def test_severity_survives_an_unreachable_outline_and_the_rerun_retries(
     assert {"burned", "severity"} <= set(scores)
     assert scores["severity"]["min_class_or_worse"] == first_scores["severity"]["min_class_or_worse"]
     assert redone.summary["headline"]["order"][-2:] == ["recall_inside_reference", "iou"]
+    # The redone report carries the stop warning once, not once per run, and no skipped warning.
+    warnings = redone.report["warnings"]
+    assert sum(w.endswith(wf.STOP_WARNING) for w in warnings) == 1, warnings
+    assert not any(w.startswith(wf.VALIDATION_SKIPPED) for w in warnings)
     assert run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw).skipped
+
+
+def test_adding_validate_after_a_severity_only_run_scores_the_outline(
+    caldor_reader, caldor_store, fixture_aoi, block_severity, tmp_path, monkeypatch
+):
+    _, log = caldor_store
+    aoi_path, aoi = fixture_aoi
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader, "severity": block_severity}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert first.validation_written and set(json.loads(first.paths.validation.read_text())["scores"]) == {"severity"}
+    before = first.paths.report.read_text()
+    reads = len(log.chunk_keys())
+    # The outline cannot be loaded: strict stops, and otherwise nothing is redone; the report is left as it was.
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    with pytest.raises(StrictValidationError):
+        run_wildfire(aoi_path, 2020, 2022, out, validate=True, strict_validate=True, **kw)
+    assert first.paths.report.read_text() == before
+    again = run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw)
+    assert again.skipped and not again.validation_redone and not again.validation_written
+    assert again.report == first.report and first.paths.report.read_text() == before
+    assert run_wildfire(aoi_path, 2020, 2022, out, **kw).skipped
+    # Reachable: adding --validate (strict too) scores the outline from the outputs on disk, without a chunk read.
+    answer = [demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)]
+    monkeypatch.setattr(validate, "nifc_perimeters", lambda bbox, **k: list(answer))
+    redone = run_wildfire(aoi_path, 2020, 2022, out, validate=True, strict_validate=True, **kw)
+    assert redone.validation_redone and redone.validation_written and not redone.skipped
+    assert len(log.chunk_keys()) == reads
+    scores = json.loads(redone.paths.validation.read_text())["scores"]
+    assert {"burned", "severity"} <= set(scores)
+    assert redone.summary["validation"]["source"] == "nifc" and redone.summary["validation"]["iou"] is not None
+    assert "validation" in redone.report["outputs"]
+    # Current now for both requests.
+    assert run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw).skipped
+    assert run_wildfire(aoi_path, 2020, 2022, out, **kw).skipped
+    assert len(log.chunk_keys()) == reads
+
+
+def test_a_partial_validation_redone_without_validate_still_scores_the_outline_later(
+    caldor_reader, caldor_store, fixture_aoi, block_severity, tmp_path, monkeypatch
+):
+    _, log = caldor_store
+    aoi_path, aoi = fixture_aoi
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader, "severity": block_severity}
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    partial = run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw)
+    assert not partial.validation_written
+    reads = len(log.chunk_keys())
+    # Without --validate the severity validation is complete, and the report vouches for it.
+    severity_only = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert severity_only.validation_redone and severity_only.validation_written
+    assert "error" not in severity_only.summary["validation"]
+    answer = [demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)]
+    monkeypatch.setattr(validate, "nifc_perimeters", lambda bbox, **k: list(answer))
+    later = run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw)
+    assert later.validation_redone and later.validation_written
+    assert "burned" in json.loads(later.paths.validation.read_text())["scores"]
+    assert len(log.chunk_keys()) == reads
 
 
 def test_severity_enters_the_digest(monkeypatch, tmp_path):
@@ -1205,37 +1461,75 @@ def test_severity_enters_the_digest(monkeypatch, tmp_path):
         {"severity": one, "severity_min_class": 2},
         {"severity": one, "severity_min_class": 4},
     ]
-    for v in [*variants, {"severity": copy}, {"severity_min_class": 2}]:
+    for v in [*variants, {"severity": copy}, {"severity_min_class": 2}, {"severity": one, "validate": True}]:
         with pytest.raises(StopRunError):
             run_wildfire("caldor", 2020, 2022, tmp_path, **v)
     digests = [_common.export.run_args_digest(p, years=y, aoi_sha256="x", seed=0) for p, y, _ in seen]
     assert len(set(digests[: len(variants)])) == len(variants)
     # The file is digested by its name and content (a copy elsewhere is the same); the min class
-    # only counts with a map.
-    assert digests[len(variants)] == digests[1] and digests[-1] == digests[0]
+    # only counts with a map; --validate does not enter the digest.
+    assert digests[len(variants)] == digests[1] and digests[-2] == digests[0] and digests[-1] == digests[1]
     # A severity map asks for validation.json even without --validate.
-    assert [v for _, _, v in seen] == [False, True, True, True, True, True, True, False]
+    assert [v for _, _, v in seen] == [False, True, True, True, True, True, True, False, True]
+
+
+def _cli_args(aoi_path: Path, out: Path) -> list[str]:
+    return ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
 
 
 def test_cli_wildfire_severity_options(cli_wildfire_reader, fixture_aoi, block_severity, tmp_path):
     aoi_path, _ = fixture_aoi
     out = tmp_path / "cli"
-    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
-    args += ["--min-area-ha", "0.05", "--severity", str(block_severity), "--severity-min-class", "4"]
-    result = CliRunner().invoke(app, args)
+    opts = ["--min-area-ha", "0.05", "--severity", str(block_severity)]
+    result = CliRunner().invoke(app, [*_cli_args(aoi_path, out), *opts, "--severity-min-class", "4"])
     assert result.exit_code == 0, (result.output, result.exception)
     text = result.stdout
-    assert "Headline: Severity (severity map): IoU" in text and "against high or worse" in text
-    assert "Severity, class 4 (high) or worse: IoU" in text and "low or worse: IoU" in text
-    assert "4 high" in text and "5 increased greenness" in text
+    flat = " ".join(text.split())  # rich wraps long lines
+    assert "Headline: Severity (severity map): IoU" in flat and "against high or worse" in flat
+    assert "the stop rule reads IoU" in flat
+    assert "Severity, class 4 (high) or worse: IoU" in flat and "low or worse: IoU" in flat
+    assert "moderate or worse (the stop rule's): IoU" in flat
+    assert "4 high" in text and "5 increased greenness" in text and "0 background" in text
     report = json.loads((out / "wildfire_report.json").read_text())
     assert report["params"]["severity"] == {
         "file": block_severity.name,
         "sha256": export.file_sha256(block_severity),
         "min_class": 4,
     }
-    assert report["summary"]["validation"]["severity"]["min_class"] == 4
+    view = report["summary"]["validation"]["severity"]
+    assert view["min_class"] == 4
     assert "Validation (" not in text  # no outline was asked for
+    # The table's two columns: the class's detection rate, then the share of the detections in it.
+    for c, label in ((4, "4 high"), (0, "0 background")):
+        row = next(line for line in text.splitlines() if label in line)
+        assert re.findall(r"\d+\.\d%|n/a", row) == [
+            f"{view['detection_rate_by_class'][str(c)]:.1%}",
+            f"{view['detections_by_class'][str(c)]:.1%}",
+        ], row
+    found = re.search(r"excluded classified pixels: ([\d,]+) outside the map, ([\d,]+) non-processing", flat)
+    assert found is not None, text
+    excluded = view["excluded"]
+    assert [int(g.replace(",", "")) for g in found.groups()] == [
+        excluded["unmapped_pixels"],
+        excluded["non_processing_pixels"],
+    ]
+    assert excluded["unmapped_pixels"] != excluded["non_processing_pixels"]
+    assert f"burned pixels outside the map {view['detections_by_class']['unmapped']:.1%}" in flat
+    # The default min class is the stop rule's own, so the line does not repeat it.
+    default = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "default"), *opts])
+    assert default.exit_code == 0, default.output
+    assert "stop rule" not in " ".join(default.stdout.split())
+
+
+def test_cli_wildfire_prints_a_bracketed_severity_file_name(cli_wildfire_reader, fixture_aoi, block_severity, tmp_path):
+    # Rich markup in the file name is printed, not read: "[bold]" and "[v2]" would otherwise vanish.
+    aoi_path, _ = fixture_aoi
+    named = tmp_path / "s[bold][v2].tif"
+    named.write_bytes(block_severity.read_bytes())
+    args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05", "--severity", str(named)]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert "[bold]" in result.stdout and "[v2]" in result.stdout
 
 
 def test_cli_wildfire_prints_the_severity_headline_before_the_outline(
@@ -1245,15 +1539,28 @@ def test_cli_wildfire_prints_the_severity_headline_before_the_outline(
     ref = tmp_path / "outline.geojson"
     outline = demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)
     ref.write_text(json.dumps({"type": "Feature", "properties": {}, "geometry": mapping(outline)}))
-    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path / "o")]
-    args += ["--min-area-ha", "0.05", "--reference", str(ref), "--severity", str(block_severity)]
-    result = CliRunner().invoke(app, args)
+    args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05"]
+    result = CliRunner().invoke(app, [*args, "--reference", str(ref), "--severity", str(block_severity)])
     assert result.exit_code == 0, (result.output, result.exception)
     text = result.stdout
     order = [text.index(k) for k in ("Headline: Severity", "Severity, class 3", "Validation (file): recall inside")]
     assert order == sorted(order)
     line = text[text.index("Validation (file)") :]
     assert line.index("recall inside reference") < line.index("IoU")
+
+
+def test_cli_wildfire_strict_validate_after_a_severity_only_run(
+    cli_wildfire_reader, fixture_aoi, block_severity, tmp_path, monkeypatch
+):
+    # Adding --validate --strict-validate to a --severity run is not "current": with NIFC
+    # unreachable it exits 3 instead of 0.
+    aoi_path, _ = fixture_aoi
+    args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05", "--severity", str(block_severity)]
+    assert CliRunner().invoke(app, args).exit_code == 0
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    result = CliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
+    assert result.exit_code == EXIT_VALIDATION, result.output
+    assert "services3.arcgis.com" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -1265,8 +1572,7 @@ def test_cli_wildfire_prints_the_severity_headline_before_the_outline(
 )
 def test_cli_wildfire_bad_severity_exits_2(cli_wildfire_reader, fixture_aoi, tmp_path, extra, message):
     aoi_path, _ = fixture_aoi
-    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path)]
-    result = CliRunner().invoke(app, [*args, *extra])
+    result = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path), *extra])
     assert result.exit_code == EXIT_USAGE and message in result.stderr
     assert not (tmp_path / "wildfire_report.json").exists()
 
@@ -1276,12 +1582,8 @@ def test_cli_wildfire_unusable_severity_file_exits_2_before_reading(
 ):
     _, log = caldor_store
     aoi_path, _ = fixture_aoi
-    transform, n, epsg = _fixture_grid(caldor_fixture)
-    bad = _blocks(n)
-    bad[20, 20] = 9
-    path = _write_raster(tmp_path / "nine.tif", bad, transform, epsg)
-    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path / "o")]
-    result = CliRunner().invoke(app, [*args, "--severity", str(path)])
+    path = _nine(caldor_fixture, tmp_path)
+    result = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "o"), "--severity", str(path)])
     assert result.exit_code == EXIT_USAGE and "nine.tif" in result.stderr and "0 to 6" in result.stderr
     assert log.chunk_keys() == []
 
@@ -1301,3 +1603,74 @@ def test_cli_wildfire_passes_the_severity_options(monkeypatch, tmp_path):
     assert seen["severity"] == sev and seen["severity_min_class"] == 2 and seen["validate"] is False
     CliRunner().invoke(app, args)
     assert seen["severity_min_class"] == 3
+
+
+# --------------------------------------------------------------------------------------------
+# scripts/make_caldor_dnbr.py, offline: the parts that decide the COG's bytes
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def dnbr_script():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "make_caldor_dnbr.py"
+    spec = importlib.util.spec_from_file_location("make_caldor_dnbr", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses look their module up there
+    try:
+        spec.loader.exec_module(module)
+        yield module
+    finally:
+        sys.modules.pop(spec.name, None)
+
+
+def test_the_proxy_cog_bytes_depend_only_on_what_it_is_made_from(
+    dnbr_script, caldor_reader, caldor_fixture, fixture_aoi, tmp_path, monkeypatch
+):
+    s = dnbr_script
+
+    class Clock(dt.datetime):
+        ticks = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.ticks += 1
+            return dt.datetime(2026, 1, 1, tzinfo=dt.UTC) + dt.timedelta(minutes=cls.ticks)
+
+    # A clock that moves on every call: nothing the COG holds may read it.
+    monkeypatch.setattr(
+        s, "dt", types.SimpleNamespace(datetime=Clock, date=dt.date, timedelta=dt.timedelta, UTC=dt.UTC)
+    )
+    records = [
+        {"scene": "S2A_10SGH_20210615_1_L2A", "window": [0, 0, 32, 32]},
+        {"scene": "S2B_10SGJ_20210620_1_L2A", "window": None},
+    ]
+    kw = {"offset": -0.0133, "pre": records, "post": records[:1], "tiles": ["10SGH", "10SGJ"], "aoi_sha256": "ab"}
+    tags = s.cog_tags(**kw)
+    assert tags == s.cog_tags(**kw)
+    assert tags["TESSERA_APPS_SOURCE"] == "sentinel2_dnbr" and not any("CREATED" in k for k in tags)
+    assert json.loads(tags["TESSERA_APPS_PRE_SCENES"]) == ["S2A_10SGH_20210615_1_L2A"]
+    # The proxy on the fixture's grid at 20 m: classes inside an AOI square, nodata outside it.
+    fx_transform, n, _ = _fixture_grid(caldor_fixture)
+    grid = s.Grid(rasterio.Affine(20.0, 0.0, fx_transform.c, 0.0, -20.0, fx_transform.f), n // 2, n // 2)
+    inside = np.zeros(grid.shape, dtype=bool)
+    inside[2:-2, 2:-2] = True
+    dnbr = np.linspace(-0.3, 1.0, inside.size, dtype=np.float32).reshape(grid.shape)
+    dnbr[5, :] = np.nan
+    classes = s.classify(dnbr, inside)
+    assert (classes[~inside] == s.NODATA).all()
+    assert set(np.unique(classes[inside]).tolist()) == {1, 2, 3, 4, 5, 6}
+    a = s.write_cog(tmp_path / "a.tif", classes, grid, tags)
+    b = s.write_cog(tmp_path / "b.tif", classes, grid, s.cog_tags(**kw))
+    assert export.file_sha256(a) == export.file_sha256(b)
+    with rasterio.open(a) as ds:
+        assert ds.nodata == s.NODATA and ds.tags()["TESSERA_APPS_SOURCE"] == "sentinel2_dnbr"
+        assert not any("CREATED" in k for k in ds.tags())
+    # The wildfire app takes the nodata outside the proxy's AOI as unmapped, not as background.
+    _, aoi = fixture_aoi
+    plan = plan_aoi(caldor_reader, aoi)
+    codes, info = wf.load_severity(plan, a)
+    (z,) = plan.zones
+    got = codes[z.zone][z.mask]
+    assert info["proxy"] is True and info["nodata"] == s.NODATA
+    assert (got == UNMAPPED).any() and not (got == 0).any()
