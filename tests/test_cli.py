@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 
 import pytest
@@ -12,6 +13,8 @@ from tessera_apps import validate
 from tessera_apps.cli import EXIT_USAGE, EXIT_VALIDATION, app
 
 from .conftest import SITE_BOX, TARGET_BOX, KeyLog, grid_polygon, restore_corner, restore_store, write_polygon
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def test_help_lists_info():
@@ -55,6 +58,8 @@ def restore_cli(_restore_mem, tmp_path, monkeypatch):
 def test_restore_help_lists_its_options():
     result = CliRunner().invoke(app, ["restore", "--help"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
+    # Rich colours the help where it detects CI (GITHUB_ACTIONS), splitting option names with escape codes.
+    text = ANSI_ESCAPE.sub("", result.output)
     for option in (
         "--aoi",
         "--site",
@@ -65,7 +70,7 @@ def test_restore_help_lists_its_options():
         "--no-canopy",
         "--placebos",
     ):
-        assert option in result.output, option
+        assert option in text, option
 
 
 def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
@@ -73,7 +78,7 @@ def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
     runner = CliRunner()
     first = runner.invoke(app, [*base, "--planted", "2020"], env={"COLUMNS": "200"})
     assert first.exit_code == 0, (first.output, first.exception)
-    lines = first.stdout.splitlines()
+    lines = ANSI_ESCAPE.sub("", first.stdout).splitlines()
     assert lines[0] == "Verdict: diverging from control since 2020"
     for text in (
         "Trajectory",
@@ -93,12 +98,12 @@ def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
         "Limitation: There is no global reference layer",
         "GB of chunks",
     ):
-        assert text in first.stdout, text
+        assert text in ANSI_ESCAPE.sub("", first.stdout), text
     report = json.loads((tmp_path / "out" / "restore_report.json").read_text())
     assert report["summary"]["verdict"] == "diverging from control since 2020"
     reads = len(log.log)
     second = runner.invoke(app, [*base, "--planted", "2020"])
-    assert second.exit_code == 0 and "current" in second.stdout and len(log.log) == reads
+    assert second.exit_code == 0 and "current" in ANSI_ESCAPE.sub("", second.stdout) and len(log.log) == reads
 
 
 @pytest.mark.parametrize(
