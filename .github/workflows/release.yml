@@ -37,19 +37,17 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: The repository is public
+      - name: Whether the repository is public
         # The README (the PyPI page), the project URLs and the source install routes all point at this
         # repository, and PyPI keeps each release's page as uploaded. An anonymous request to a private
-        # repository gets a 404. docs/releasing.md, one-time setup, step 0.
+        # repository gets a 404, so say so; the owner keeps it private by choice (docs/releasing.md,
+        # one-time setup, step 0), and the release goes ahead either way.
         run: |
           url="https://github.com/$GITHUB_REPOSITORY"
           if curl -fsS -o /dev/null --retry 3 "$url"; then
             echo "$url is public"
-          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            echo "::error::$url cannot be opened without signing in. Make the repository public before releasing (docs/releasing.md, one-time setup, step 0); otherwise the PyPI page's links and the source install routes give a 404"
-            exit 1
           else
-            echo "::warning::$url cannot be opened without signing in. A tag push stops here until the repository is public (docs/releasing.md, one-time setup, step 0)"
+            echo "::warning::$url cannot be opened without signing in, so the PyPI page's links, the project URLs and the source install routes give others a 404 (docs/releasing.md, one-time setup, step 0)"
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

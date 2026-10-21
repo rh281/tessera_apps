@@ -9,7 +9,7 @@ Releases go to PyPI as [`tessera-apps`](https://pypi.org/project/tessera-apps/) 
 On a push of a tag `vX.Y.Z`:
 
 1. **`ci`** runs the whole of `ci.yml` (lockfile, ruff, mypy, offline tests) on Python 3.12 and 3.13.
-2. **`build`** checks that the repository is public (step 0 of the one-time setup) and that the tag is `v` plus `__version__`, and stops, naming the problem, if not. It takes the release notes from the `## X.Y.Z (date)` section of `CHANGELOG.md` and stops if there is none. Then it runs `uv build`, `scripts/check_dist.py` (what the wheel and the sdist must and must not hold, and their metadata) and `twine check --strict`. Last, a smoke test: a fresh Python 3.12 venv, `pip install` of the wheel with its dependencies resolved from PyPI as a user would get them, `tessera-apps --version` and `--help`, and the offline test suite run against the installed wheel.
+2. **`build`** warns when the repository is private (step 0 of the one-time setup), and checks that the tag is `v` plus `__version__`, stopping with both values if not. It takes the release notes from the `## X.Y.Z (date)` section of `CHANGELOG.md` and stops if there is none. Then it runs `uv build`, `scripts/check_dist.py` (what the wheel and the sdist must and must not hold, and their metadata) and `twine check --strict`. Last, a smoke test: a fresh Python 3.12 venv, `pip install` of the wheel with its dependencies resolved from PyPI as a user would get them, `tessera-apps --version` and `--help`, and the offline test suite run against the installed wheel.
 3. **`publish`** uploads the build to PyPI, in the GitHub environment `pypi`.
 4. **`github-release`** creates the GitHub release for the tag, with the wheel and the sdist attached and the changelog section as its notes.
 
@@ -19,13 +19,7 @@ Nothing is published unless every earlier job passed. The workflow can also be r
 
 These steps need an owner of the PyPI account and an admin of the GitHub repository. Until they are done, the `publish` job fails and nothing is uploaded.
 
-0. **Make the repository public, before the first tag.** The README is the PyPI page and links to this repository about twenty times, the package's Homepage, Source, Issues and Changelog links point here, and the README's "from source" and reproducible install routes clone it. While the repository is private all of those give a 404 to everyone else, and PyPI keeps each release's page as it was uploaded, so a release made while private keeps its dead links for ever. In *Settings*, *General*, *Danger Zone*, choose *Change visibility* and make it public. Then check from a machine that is not signed in to GitHub:
-
-   ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' https://github.com/rh281/tessera_apps
-   ```
-
-   It must print `200` (a private repository gives `404`). The `build` job runs the same check on a tag push and stops the release, before anything is published, when the repository is not public; a dry run only warns.
+0. **Public or private: the owner's choice.** The repository is private, by decision. The README is the PyPI page and links to this repository about twenty times, and the package's Homepage, Source, Issues and Changelog links point here, as do the README's "from source" and reproducible install routes. While the repository is private, all of those give a 404 to anyone without access, and PyPI keeps each release's page as it was uploaded. The package itself installs and runs from PyPI either way. To make it public later: *Settings*, *General*, *Danger Zone*, *Change visibility*; a later release then carries working links. The `build` job checks this on every run and warns when the repository cannot be opened without signing in, but it does not stop the release.
 1. **PyPI pending trusted publisher.** Sign in at <https://pypi.org>, open *Your account*, *Publishing*, and add a pending publisher of type GitHub with:
    - PyPI project name: `tessera-apps`
    - Owner: `rh281`

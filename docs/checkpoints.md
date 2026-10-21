@@ -652,7 +652,7 @@ That number is likely optimistic against real MTBS, for two reasons. The proxy a
 - **`scripts/check_dist.py`** checks both archives against the source tree and the metadata, and fails naming each problem.
 - **`.github/workflows/release.yml`.** On a `v*` tag it:
   1. runs the full CI (by calling `ci.yml`);
-  2. checks the repository is public and that the tag matches the version;
+  2. warns if the repository is private, and checks that the tag matches the version;
   3. builds, runs `check_dist`, then `twine check --strict`;
   4. pip-installs the wheel into a clean Python 3.12 with dependencies from PyPI, and runs the offline suite against the installed wheel;
   5. publishes to PyPI by trusted publishing (no token);
@@ -702,7 +702,7 @@ What is still untested is the publish itself, which needs the PyPI side set up.
 
 ### What is left for the owner
 
-1. **Make rh281/tessera_apps public**, or decide not to. It is private today, so the PyPI page's links, the project URLs and the source install route would 404. The release workflow refuses a tag push until it is public.
+1. **Public or private.** The owner keeps rh281/tessera_apps private. The PyPI page's links, the project URLs and the source install route therefore give a 404 to anyone without access; the package installs and runs from PyPI regardless. The release workflow warns about this and goes ahead.
 2. **Register the trusted publisher on PyPI.** Add a pending publisher with:
    - project `tessera-apps`;
    - owner `rh281`;
