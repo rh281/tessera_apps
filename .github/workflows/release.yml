@@ -198,5 +198,10 @@ jobs:
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          gh release create "$TAG" dist/* --verify-tag --title "tessera_apps $VERSION" \
-            --notes-file notes/release-notes.md
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # The tag came from a release made in GitHub's web UI: keep its text, attach the dists.
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "tessera_apps $VERSION" \
+              --notes-file notes/release-notes.md
+          fi

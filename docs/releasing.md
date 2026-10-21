@@ -27,6 +27,8 @@ These steps need an owner of the PyPI account and an admin of the GitHub reposit
    - Workflow name: `release.yml`
    - Environment name: `pypi`
 
+   GitHub offers environments in private repositories only on its paid plans. If this repository is private on GitHub Free, leave the environment name blank instead: PyPI then accepts this workflow with or without one.
+
    The first successful publish creates the project and turns the pending publisher into a normal one. A pending publisher does not reserve the name, so do the first release soon after.
 2. **GitHub environment `pypi`.** In the repository's *Settings*, *Environments*, create `pypi`. Optionally:
    - add **required reviewers**, so a person approves each upload before it starts (GitHub offers them on a public repository, and on a private one only with a paid plan);
@@ -49,12 +51,14 @@ These steps need an owner of the PyPI account and an admin of the GitHub reposit
    ```
 
    TestPyPI keeps the version too, so a second upload of the same version there fails. That is expected: the checks before the upload still say whether the build is good.
-6. **Tag and push the tag:**
+6. **Tag and push the tag**, from a clone of the repository:
 
    ```bash
    git tag -a vX.Y.Z -m "tessera_apps X.Y.Z"
    git push origin vX.Y.Z
    ```
+
+   Or from the web: *Releases*, *Draft a new release*, type `vX.Y.Z` under *Choose a tag* and pick *Create new tag on publish* with target `main`, give it a title, and *Publish release*. The new tag starts the same run, which attaches the sdist and the wheel to that release and keeps the text you wrote. (A Claude Code session cannot push tags: its git proxy refuses them, so the owner does this step.)
 
 7. **Watch the run** in the Actions tab, and approve the `pypi` deployment if the environment has reviewers.
 8. **Check the release** from a clean venv, with no AWS credentials set:
