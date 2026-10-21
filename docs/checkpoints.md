@@ -641,3 +641,74 @@ That number is likely optimistic against real MTBS, for two reasons. The proxy a
 - **Wildfire memory estimate:** 4.76 GB for Caldor against measured peaks of 5.15 to 5.27 GB.
 - **Misleading band name:** the restore COG's `baseline_similarity` band holds the match-year similarity, as its description says.
 - **Treated land in a control:** a control ring can hold treated land, like the Itapebi negative's neighbouring compartment. An option to exclude known projects from the ring would help.
+
+## Checkpoint 7: README, lockfile, release workflow, PyPI 0.1.0 (2026-10-21)
+
+### Built
+
+- **Version 0.1.0**, single-sourced from `tessera_apps.__version__`, with `tessera-apps --version`.
+- **Licence and metadata:** the Apache-2.0 `LICENSE`, PEP 639 licence metadata, project URLs, classifiers and `py.typed`.
+- **The archives.** The wheel (292 KB, 27 files) holds the package and its six demo GeoJSON files. The sdist (5.2 MB) holds the source, tests with fixtures, scripts and docs, and no notebooks.
+- **`scripts/check_dist.py`** checks both archives against the source tree and the metadata, and fails naming each problem.
+- **`.github/workflows/release.yml`.** On a `v*` tag it:
+  1. runs the full CI (by calling `ci.yml`);
+  2. checks the repository is public and that the tag matches the version;
+  3. builds, runs `check_dist`, then `twine check --strict`;
+  4. pip-installs the wheel into a clean Python 3.12 with dependencies from PyPI, and runs the offline suite against the installed wheel;
+  5. publishes to PyPI by trusted publishing (no token);
+  6. creates the GitHub release, with notes from the CHANGELOG.
+
+  A manual run does everything except publish, or publishes to TestPyPI when asked.
+- **Docs:**
+  - README rewritten for the PyPI page: absolute links, install routes, a command line section and exit codes.
+  - `CHANGELOG.md`.
+  - `docs/releasing.md`: the one-time setup and the steps for each release.
+  - `docs/upstream-pointer.md`: the paragraph for the dClimate/tessera-embeddings README.
+- **Fixes the release checks found:**
+  - a store that cannot be opened exits 2 with one line, not a 70-line traceback;
+  - `wildfire_validation.json` records an outline reference it could not load;
+  - restore's terminal tables fit 80 columns.
+- **Lockfile:** `requirements-lock.txt` is current (CI checks it on every push).
+- **Tests:** 1,165 offline.
+
+### Definition of done (brief section 10), checked from a clean install
+
+The wheel was installed with pip into clean Python 3.12 and 3.13 environments, with dependencies resolved from PyPI rather than the lock. Every `AWS_*` variable was unset and HOME was empty.
+
+| Item | Result |
+|---|---|
+| `pip install tessera_apps` on clean Python 3.12, no AWS credentials | passes for the wheel (3.12 and 3.13). The PyPI install itself waits for the release |
+| wildfire demo end to end: COG, tables, preview, validation JSON | passes with `--severity`. NIFC is blocked here, so the outline validation is skipped with a warning |
+| the same for deforest, wetland and restore | passes; every number matches the checkpoint reports, and every COG is byte-identical to the earlier runs |
+| notebooks committed with outputs | passes. Rendering on GitHub can only be checked once the repository is public |
+| `pytest` offline | 1,165 pass, also against the installed wheel and with the network cut off |
+| `pytest -m network` against the live store | 8 pass; 4 fail, all on hosts blocked here (NIFC, EFFIS, Zenodo, USFS) |
+| README: each app in a paragraph with its demo command and notebook | passes |
+| pointer in the upstream README | `docs/upstream-pointer.md`; it needs a dClimate maintainer to paste it |
+
+### The release workflow on GitHub
+
+Two trial runs from the Actions tab, with publishing off:
+
+- **Run 1 failed in its CI stage.** One new CLI test matched text that typer had coloured, because typer forces colour when it detects GitHub Actions. All CLI tests now use a runner that strips ANSI escapes. Locally, six of them failed under `FORCE_COLOR` before the change.
+- **Run 2 passed** ([run 39640370876](https://github.com/rh281/tessera_apps/actions/runs/39640370876)):
+  - CI passed on 3.12 and 3.13, and the lockfile is current.
+  - The build passed: the tag and version check, release notes from the CHANGELOG, `check_dist`, and `twine check --strict`.
+  - pip installed the wheel into a clean Python 3.12, with dependencies resolved from PyPI. 1,165 tests passed against the installed wheel.
+  - Both artifacts uploaded: the dists, 5.5 MB.
+  - The PyPI, TestPyPI and GitHub release jobs were skipped, as they should be on a trial run.
+
+What is still untested is the publish itself, which needs the PyPI side set up.
+
+### What is left for the owner
+
+1. **Make rh281/tessera_apps public**, or decide not to. It is private today, so the PyPI page's links, the project URLs and the source install route would 404. The release workflow refuses a tag push until it is public.
+2. **Register the trusted publisher on PyPI.** Add a pending publisher with:
+   - project `tessera-apps`;
+   - owner `rh281`;
+   - repository `tessera_apps`;
+   - workflow `release.yml`;
+   - environment `pypi`.
+
+   Also create the `pypi` environment in the repository settings.
+3. **Push the tag `v0.1.0`.** A PyPI version can never be reused, so this is a one-way step.
