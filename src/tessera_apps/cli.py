@@ -35,8 +35,28 @@ EXIT_VALIDATION = 3
 DEFAULT_OUT = Path("out")
 
 
+def _print_version(value: bool) -> None:
+    """Print ``tessera-apps <version>`` and exit 0 when ``--version`` is given.
+
+    Args:
+        value: Whether ``--version`` was given.
+
+    Raises:
+        typer.Exit: Always, when ``value`` is true, so no command runs.
+    """
+    if value:
+        typer.echo(f"tessera-apps {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
-def main() -> None:
+def main(
+    # Handled by the eager callback, which exits before any command runs.
+    version: Annotated[
+        bool,
+        typer.Option("--version", callback=_print_version, is_eager=True, help="Print the package version and exit."),
+    ] = False,
+) -> None:
     """Climate applications on the TESSERA v1.1 global embeddings."""
 
 
@@ -46,14 +66,19 @@ def info(
     snapshot: str | None = typer.Option(None, help="Pin an Icechunk snapshot id."),
 ) -> None:
     """Open the store anonymously and print its provenance and one zone's published years."""
-    from tessera_apps.io import TesseraReader
+    from tessera_apps.io import TesseraError, TesseraReader
 
-    reader = TesseraReader.open(snapshot_id=snapshot)
+    try:
+        reader = TesseraReader.open(snapshot_id=snapshot)
+        years = reader.years_complete(zone)
+    except (TesseraError, ValueError) as exc:
+        # The store cannot be opened (no network, a bad --snapshot), or --zone is malformed or absent.
+        raise _fail(f"Error: {_error_text(exc)}", EXIT_USAGE) from exc
     out = {
         "tessera_apps": __version__,
         **reader.provenance(),
         "zone": zone,
-        "years_complete": reader.years_complete(zone),
+        "years_complete": years,
         "bytes_read": reader.bytes_read,
     }
     typer.echo(json.dumps(out, indent=1, default=str))
@@ -849,36 +874,52 @@ def _print_restore(report: Mapping[str, Any], *, skipped: bool, out: Path) -> No
         f"{e(site.get('source'))}: {_fmt(site.get('area_ha'), ',.1f')} ha, {_fmt(site.get('pixels_used'), ',')} of "
         f"{_fmt(site.get('pixels'), ',')} pixels used, in {e(', '.join(s.get('zones') or []))}"
     )
-    table = Table(title="Trajectory (divergence from control, change since the baseline, placebo band)")
-    columns = (
-        ("year", "year", "d"),
-        ("post", "post_planting", "b"),
-        ("D", "divergence", ".4g"),
-        ("dD", "divergence_change", ".4g"),
-        ("p05", "placebo_p05", ".4g"),
-        ("p50", "placebo_p50", ".4g"),
-        ("p95", "placebo_p95", ".4g"),
-        ("sig", "significant", "b"),
-        ("null dD", "null_divergence_change", ".4g"),
-        ("departed chg", "departed_fraction_change", "+.1%"),
-        ("closer to target", "closer_to_target_fraction", ".1%"),
-        ("progress", "target_progress", ".2f"),
-        ("radar-free", "site_radar_free_fraction", ".0%"),
+    # Two tables, each narrow enough for an 80-column terminal or a pipe (rich's default width), so no
+    # cell is cut to an ellipsis; a still narrower terminal folds a cell onto two lines instead.
+    # Fixed decimals keep every value of a column the same width. The csv has the full precision.
+    year_columns = (("year", "year", "d"), ("post", "post_planting", "b"))
+    tables = (
+        (
+            "Trajectory: divergence from control (D), its change since the baseline (dD) against the placebo "
+            "band, and the null test's change",
+            (
+                *year_columns,
+                ("D", "divergence", ".4f"),
+                ("dD", "divergence_change", ".4f"),
+                ("p05", "placebo_p05", ".4f"),
+                ("p50", "placebo_p50", ".4f"),
+                ("p95", "placebo_p95", ".4f"),
+                ("sig", "significant", "b"),
+                ("null dD", "null_divergence_change", ".4f"),
+            ),
+        ),
+        (
+            "Trajectory: site pixels",
+            (
+                *year_columns,
+                ("departed chg", "departed_fraction_change", "+.1%"),
+                ("closer to target", "closer_to_target_fraction", ".1%"),
+                ("progress", "target_progress", ".2f"),
+                ("radar-free", "site_radar_free_fraction", ".0%"),
+            ),
+        ),
     )
-    for name, _key, _spec in columns:
-        table.add_column(name, justify="right")
-    for row in s.get("trajectory") or []:
-        cells = []
-        for _name, key, spec in columns:
-            value = row.get(key)
-            if spec == "b":
-                cells.append("yes" if value else "no")
-            elif spec == "d":
-                cells.append(e(value))
-            else:
-                cells.append(_fmt(value, spec))
-        table.add_row(*cells)
-    console.print(table)
+    for title, columns in tables:
+        table = Table(title=title)
+        for name, _key, _spec in columns:
+            table.add_column(name, justify="right", overflow="fold")
+        for row in s.get("trajectory") or []:
+            cells = []
+            for _name, key, spec in columns:
+                value = row.get(key)
+                if spec == "b":
+                    cells.append("yes" if value else "no")
+                elif spec == "d":
+                    cells.append(e(value))
+                else:
+                    cells.append(_fmt(value, spec))
+            table.add_row(*cells)
+        console.print(table)
     cover = s.get("match_year_data") or {}
     shares = [
         f"{role} {_fmt(rec.get('with_data'), ',')} of {_fmt(rec.get('pixels'), ',')}"

@@ -547,7 +547,7 @@ All four runs used planted 2019, the years 2018 to 2025, match year 2017, `--tar
 | | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 |
 |---|---|---|---|---|---|---|---|
 | dD | 0.027 | 0.283 | 0.471 | 0.336 | 0.368 | 0.416 | 0.340 |
-| Placebo p95 | 0.019 | 0.002 | 0.063 | 0.043 | 0.012 | 0.026 | 0.018 |
+| Placebo p95 | 0.018 | 0.002 | 0.063 | 0.043 | 0.012 | 0.026 | 0.018 |
 
 Reading the numbers:
 
@@ -638,6 +638,6 @@ That number is likely optimistic against real MTBS, for two reasons. The proxy a
 
 ### Known issues
 
-- **Wildfire memory estimate:** 4.8 GB for Caldor against a measured peak of 5.15 GB.
+- **Wildfire memory estimate:** 4.76 GB for Caldor against measured peaks of 5.15 to 5.27 GB.
 - **Misleading band name:** the restore COG's `baseline_similarity` band holds the match-year similarity, as its description says.
 - **Treated land in a control:** a control ring can hold treated land, like the Itapebi negative's neighbouring compartment. An option to exclude known projects from the ring would help.

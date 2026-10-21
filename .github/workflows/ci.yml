@@ -4,9 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow (release.yml) runs this whole check before it builds anything.
+  workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # github.workflow is the caller's name when release.yml calls this file, so a release's check never
+  # shares a group with (and never cancels, or is cancelled by) a push or pull request run on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

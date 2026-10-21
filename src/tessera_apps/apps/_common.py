@@ -381,7 +381,7 @@ def _open_reader(snapshot_id: str | None) -> Reader:
 def code_record(modules: Iterable[ModuleType | str] = ()) -> dict[str, str]:
     """The code that shapes an app's outputs, for the arguments digest (survey S19).
 
-    An upgrade, or an edit during development (the version stays ``0.1.0.dev0`` throughout), that
+    An upgrade, or an edit between releases (the version stays the same until the next one), that
     changes the shared logic must not let a rerun keep outputs made by the old code. So the record
     holds the package version and the sha256 of the source of :data:`FRAMEWORK_MODULES` plus the
     app's own modules.

@@ -119,6 +119,10 @@ class ReadTooLargeError(TesseraError):
     """A single window read would exceed the in-memory limit."""
 
 
+class StoreUnavailableError(TesseraError):
+    """The store cannot be opened: it cannot be reached, or the snapshot asked for is not in it."""
+
+
 # --------------------------------------------------------------------------------------------
 # Zones
 # --------------------------------------------------------------------------------------------
@@ -516,6 +520,19 @@ def _coalesce_options(**options: int | None) -> dict[str, int]:
     return {k: v for k, v in options.items() if v is not None}
 
 
+def _icechunk_message(exc: BaseException) -> str:
+    """An icechunk error's message without the Rust stack it appends after a ``context:`` line.
+
+    Args:
+        exc: The error icechunk raised.
+
+    Returns:
+        The message, stripped; the error's class name when the message is empty.
+    """
+    text = str(exc).split("\ncontext:", 1)[0].strip()
+    return text or type(exc).__name__
+
+
 def _find_counter(store: Any) -> ByteCounter | None:  # noqa: ANN401
     """The counter of the first CountingStore in a chain of wrapper stores."""
     seen = 0
@@ -638,15 +655,29 @@ class TesseraReader:
             cache: Optional on-disk chunk cache. The reader uses it under a namespace named after the
                 snapshot (``reader.cache``), so a new snapshot never serves stale chunks; hit and miss
                 counts are shared with the object passed in.
+
+        Raises:
+            StoreUnavailableError: The store cannot be reached, ``snapshot_id`` is not a valid id or
+                not one of the store's snapshots, or ``branch`` does not exist. The message is
+                icechunk's, without its internal stack.
         """
         import icechunk
 
         storage = icechunk.s3_storage(bucket=STORE_BUCKET, prefix=STORE_PREFIX, region=STORE_REGION, anonymous=True)
-        # Pass no config: a config here replaces the one saved with the store wholesale.
-        repo = icechunk.Repository.open(storage)
-        session = repo.readonly_session(snapshot_id=snapshot_id) if snapshot_id else repo.readonly_session(branch)
-        counting = CountingStore(session.store)
-        root = zarr.open_group(counting, mode="r")
+        try:
+            # Pass no config: a config here replaces the one saved with the store wholesale.
+            repo = icechunk.Repository.open(storage)
+            session = repo.readonly_session(snapshot_id=snapshot_id) if snapshot_id else repo.readonly_session(branch)
+            counting = CountingStore(session.store)
+            root = zarr.open_group(counting, mode="r")
+        except icechunk.IcechunkError as exc:
+            where = f"snapshot {snapshot_id}" if snapshot_id else f"branch {branch!r}"
+            hint = f"Check that this machine can reach S3 in {STORE_REGION} (no AWS credentials are needed)"
+            if snapshot_id:
+                hint += " and that the snapshot id is one of the store's (tessera-apps info prints the current one)"
+            raise StoreUnavailableError(
+                f"Cannot open the store {STORE_URL} at {where}: {_icechunk_message(exc)}. {hint}."
+            ) from exc
         provenance = {
             "backend": "icechunk",
             "store_url": STORE_URL,
@@ -1430,6 +1461,7 @@ __all__ = [
     "PointRead",
     "ReadTooLargeError",
     "Reader",
+    "StoreUnavailableError",
     "TesseraError",
     "TesseraReader",
     "Window",

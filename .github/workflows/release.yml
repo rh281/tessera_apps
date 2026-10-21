@@ -1,0 +1,204 @@
+name: release
+
+# Publishes tessera_apps to PyPI with trusted publishing (no API token) when a tag vX.Y.Z is pushed.
+# Run it from the Actions tab (workflow_dispatch) for a dry run: the full check, the build and the
+# smoke test, and nothing published unless "testpypi" is ticked. docs/releasing.md has the steps.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Also publish the build to TestPyPI (otherwise nothing is published)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per tag (or branch, for a dry run) at a time; a second run waits instead of racing.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    # The full check on Python 3.12 and 3.13. A job that calls a workflow cannot set
+    # timeout-minutes; the called job sets its own.
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: The repository is public
+        # The README (the PyPI page), the project URLs and the source install routes all point at this
+        # repository, and PyPI keeps each release's page as uploaded. An anonymous request to a private
+        # repository gets a 404. docs/releasing.md, one-time setup, step 0.
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY"
+          if curl -fsS -o /dev/null --retry 3 "$url"; then
+            echo "$url is public"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "::error::$url cannot be opened without signing in. Make the repository public before releasing (docs/releasing.md, one-time setup, step 0); otherwise the PyPI page's links and the source install routes give a 404"
+            exit 1
+          else
+            echo "::warning::$url cannot be opened without signing in. A tag push stops here until the repository is public (docs/releasing.md, one-time setup, step 0)"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      - name: Package version, and the tag against it
+        id: version
+        run: |
+          version="$(sed -nE 's/^__version__ = "([^"]+)"$/\1/p' src/tessera_apps/__init__.py)"
+          if [ -z "$version" ]; then
+            echo "::error::no __version__ = \"X.Y.Z\" line in src/tessera_apps/__init__.py"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the package version $version: push tag v$version, or set __version__ = \"${GITHUB_REF_NAME#v}\" and tag again"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Package version $version, ref $GITHUB_REF_TYPE $GITHUB_REF_NAME"
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # The lines under "## X.Y.Z (date)" up to the next "## " heading.
+          mkdir -p notes
+          awk -v want="## $VERSION " 'index($0, want) == 1 { on = 1; next } on && /^## / { exit } on { print }' \
+            CHANGELOG.md > notes/release-notes.md
+          if ! grep -q '[^[:space:]]' notes/release-notes.md; then
+            echo "::error::CHANGELOG.md has no '## $VERSION (YYYY-MM-DD)' section with notes under it"
+            exit 1
+          fi
+          cat notes/release-notes.md
+
+      - name: Build the sdist and the wheel
+        run: uv build -o dist
+
+      - name: Check what the archives hold
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: uv run --no-project --python 3.12 python scripts/check_dist.py dist --version "$VERSION" --list
+
+      - name: twine check
+        run: uvx twine==7.0.0 check --strict dist/*
+
+      - name: Smoke test the wheel in a clean Python 3.12
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          smoke="$RUNNER_TEMP/smoke"
+          uv venv --seed -p 3.12 "$smoke"
+          # Dependencies resolve from PyPI, as for a user, not from the lock.
+          "$smoke/bin/pip" install "dist/tessera_apps-$VERSION-py3-none-any.whl"
+          "$smoke/bin/pip" list
+          got="$("$smoke/bin/tessera-apps" --version)"
+          if [ "$got" != "tessera-apps $VERSION" ]; then
+            echo "::error::tessera-apps --version printed '$got', expected 'tessera-apps $VERSION'"
+            exit 1
+          fi
+          "$smoke/bin/tessera-apps" --help
+
+      - name: Offline tests against the installed wheel
+        run: |
+          smoke="$RUNNER_TEMP/smoke"
+          # The test tools at the lock's pins; everything else stays as pip resolved it.
+          mapfile -t tools < <(grep -E '^(pytest|rio-cogeo)==' requirements-lock.txt)
+          if [ "${#tools[@]}" -ne 2 ]; then
+            echo "::error::requirements-lock.txt should pin pytest and rio-cogeo, found: ${tools[*]}"
+            exit 1
+          fi
+          "$smoke/bin/pip" install "${tools[@]}"
+          # The tests run from the checkout, so first make sure they import the wheel, not src/.
+          "$smoke/bin/python" -c 'import pathlib, sys, sysconfig, tessera_apps
+          f = pathlib.Path(tessera_apps.__file__).resolve()
+          site = pathlib.Path(sysconfig.get_paths()["purelib"]).resolve()
+          sys.exit(0 if site in f.parents else f"tessera_apps imports from {f}, not from {site}")'
+          "$smoke/bin/python" -m pytest -q -p no:cacheprovider
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-notes
+          path: notes/release-notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tessera-apps/${{ needs.build.outputs.version }}/
+    permissions:
+      # Trusted publishing: PyPI exchanges this job's OIDC token for a short-lived upload token.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+
+  testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/tessera-apps/${{ needs.build.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  github-release:
+    needs: [build, publish]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: release-notes
+          path: notes/
+      - name: Create the GitHub release with the dists attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "$TAG" dist/* --verify-tag --title "tessera_apps $VERSION" \
+            --notes-file notes/release-notes.md

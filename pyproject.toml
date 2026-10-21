@@ -1,18 +1,27 @@
 [project]
 name = "tessera_apps"
-version = "0.1.0.dev0"
+# The version lives in src/tessera_apps/__init__.py only (see [tool.hatch.version]).
+dynamic = ["version"]
 description = "Climate applications on the TESSERA v1.1 global embeddings: wildfire, deforestation, wetland and restoration mapping"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+# SPDX expression and licence file (PEP 639). PEP 639 forbids a licence classifier alongside it.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "dClimate CYCLOPS team" }]
 keywords = ["tessera", "embeddings", "remote-sensing", "climate", "wildfire", "deforestation", "mangrove"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     # Must match the CI matrix in .github/workflows/ci.yml.
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Topic :: Scientific/Engineering :: GIS",
+    "Typing :: Typed",
 ]
 
 # Floors follow docs/prebuild-survey.md (B1). The published store is in the Icechunk v2 repository
@@ -57,17 +66,48 @@ dev = [
 [project.scripts]
 tessera-apps = "tessera_apps.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/rh281/tessera_apps"
+Source = "https://github.com/rh281/tessera_apps"
+Issues = "https://github.com/rh281/tessera_apps/issues"
+Changelog = "https://github.com/rh281/tessera_apps/blob/main/CHANGELOG.md"
+"TESSERA embeddings" = "https://github.com/dClimate/tessera-embeddings"
+
 [build-system]
-requires = ["hatchling"]
+# 1.27 is the first hatchling that writes PEP 639 licence metadata (License-Expression, license-files).
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/tessera_apps"]
+[tool.hatch.version]
+path = "src/tessera_apps/__init__.py"
 
 [tool.hatch.build]
 # Bundled demo AOIs are GeoJSON. Listed as artifacts so no ignore rule can drop them from the
 # wheel or the sdist (survey B4).
 artifacts = ["src/tessera_apps/data/*.geojson"]
+
+[tool.hatch.build.targets.wheel]
+# The package, its data (the demo AOIs) and py.typed. The licence goes to the dist-info folder.
+packages = ["src/tessera_apps"]
+exclude = ["__pycache__", "*.py[cod]"]
+
+[tool.hatch.build.targets.sdist]
+# Everything needed to rebuild, test and lint the package. The notebooks (several MB of outputs),
+# their outputs and the CI configuration stay in the repository. scripts/check_dist.py checks both.
+include = [
+    "/src",
+    "/tests",
+    "/scripts",
+    "/docs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/pyproject.toml",
+    "/requirements-lock.txt",
+    "/ruff.toml",
+    "/mypy.ini",
+]
+exclude = ["__pycache__", "*.py[cod]"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

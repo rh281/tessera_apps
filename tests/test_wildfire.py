@@ -1344,8 +1344,13 @@ def test_severity_survives_an_unreachable_outline_and_the_rerun_retries(
     first = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw)
     # The severity scores are written; the report does not vouch for the file, since the outline is missing.
     assert not first.validation_written and first.paths.validation.is_file()
-    first_scores = json.loads(first.paths.validation.read_text())["scores"]
+    first_val = json.loads(first.paths.validation.read_text())
+    first_scores = first_val["scores"]
     assert set(first_scores) == {"severity"}
+    # The file itself says the outline was asked for and why it is missing, not only the report.
+    outline = first_val["reference"]["outline"]
+    assert outline["scored"] is False and "services3.arcgis.com" in outline["error"]
+    assert any(c.startswith(wf.OUTLINE_NOT_SCORED) and "services3.arcgis.com" in c for c in first_val["caveats"])
     assert "validation" not in first.report["outputs"]
     s = first.summary["validation"]
     assert "services3.arcgis.com" in s["error"] and s["severity"]["iou"] is not None
@@ -1362,8 +1367,11 @@ def test_severity_survives_an_unreachable_outline_and_the_rerun_retries(
     monkeypatch.setattr(validate, "nifc_perimeters", lambda bbox, **k: list(answer))
     redone = run_wildfire(aoi_path, 2020, 2022, tmp_path / "out", **kw)
     assert redone.validation_redone and redone.validation_written and len(log.chunk_keys()) == reads
-    scores = json.loads(redone.paths.validation.read_text())["scores"]
+    redone_val = json.loads(redone.paths.validation.read_text())
+    scores = redone_val["scores"]
     assert {"burned", "severity"} <= set(scores)
+    assert "outline" not in redone_val["reference"]
+    assert not any(c.startswith(wf.OUTLINE_NOT_SCORED) for c in redone_val["caveats"])
     assert scores["severity"]["min_class_or_worse"] == first_scores["severity"]["min_class_or_worse"]
     assert redone.summary["headline"]["order"][-2:] == ["recall_inside_reference", "iou"]
     # The redone report carries the stop warning once, not once per run, and no skipped warning.

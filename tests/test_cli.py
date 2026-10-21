@@ -21,6 +21,105 @@ def test_help_lists_info():
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "info" in result.output
+    assert "--version" in result.output
+
+
+def test_version_prints_the_package_version_and_exits_0(monkeypatch):
+    from tessera_apps import __version__
+
+    def no_store(**kwargs):
+        raise AssertionError("--version must not open the store")
+
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(no_store))
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output == f"tessera-apps {__version__}\n"
+    # Eager: it wins over a command given after it, which then never runs.
+    result = CliRunner().invoke(app, ["--version", "info"])
+    assert result.exit_code == 0, result.output
+    assert result.output == f"tessera-apps {__version__}\n"
+
+
+def test_version_is_single_sourced_and_has_a_changelog_section():
+    import tomllib
+    from pathlib import Path
+
+    import tessera_apps
+
+    repo = Path(__file__).resolve().parent.parent
+    pyproject = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "version" not in pyproject["project"]
+    assert pyproject["project"]["dynamic"] == ["version"]
+    assert pyproject["tool"]["hatch"]["version"]["path"] == "src/tessera_apps/__init__.py"
+    # The release notes come from this section, so the newest one must be the package's version.
+    sections = re.findall(r"^## (\S+) \((\d{4}-\d{2}-\d{2})\)$", (repo / "CHANGELOG.md").read_text(), re.MULTILINE)
+    assert sections, "CHANGELOG.md has no '## X.Y.Z (YYYY-MM-DD)' section"
+    assert sections[0][0] == tessera_apps.__version__
+
+
+def test_console_script_prints_the_version():
+    # The installed entry point, not the in-process app: what `pip install` users run.
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from tessera_apps import __version__
+
+    exe = shutil.which("tessera-apps", path=str(Path(sys.executable).parent))
+    if exe is None:
+        pytest.skip("the tessera-apps console script is not installed next to this Python")
+    done = subprocess.run([exe, "--version"], capture_output=True, text=True, check=False, timeout=120)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == f"tessera-apps {__version__}\n"
+
+
+def _store_unreachable(**kwargs):
+    from tessera_apps.io import StoreUnavailableError
+
+    raise StoreUnavailableError("Cannot open the store s3://tessera-embeddings/v1.1/dclimate.icechunk: no route")
+
+
+def test_info_exits_2_naming_the_reason_when_the_store_cannot_be_opened(monkeypatch):
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_store_unreachable))
+    result = CliRunner().invoke(app, ["info"])
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "Error: Cannot open the store" in result.stderr and "no route" in result.stderr
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(("zone", "message"), [("99X", "is malformed"), ("59S", "Zone group 59S is not in the store")])
+def test_info_exits_2_on_a_bad_zone(monkeypatch, zone, message):
+    import zarr
+    from zarr.storage import MemoryStore
+
+    from tessera_apps.io import TesseraReader
+
+    store = MemoryStore()
+    zarr.open_group(store, mode="w")
+    reader = TesseraReader.from_store(store)
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(lambda **kwargs: reader))
+    result = CliRunner().invoke(app, ["info", "--zone", zone])
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022"],
+        ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024"],
+        ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022"],
+        ["restore", "--aoi", "itapebi"],
+    ],
+)
+def test_every_app_exits_2_before_writing_when_the_store_cannot_be_opened(monkeypatch, tmp_path, argv):
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_store_unreachable))
+    out = tmp_path / "out"
+    result = CliRunner().invoke(app, [*argv, "--out", str(out)])
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "Error: Cannot open the store" in result.stderr
+    assert not out.exists() or not any(out.iterdir())
 
 
 # --------------------------------------------------------------------------------------------
@@ -104,6 +203,21 @@ def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
     reads = len(log.log)
     second = runner.invoke(app, [*base, "--planted", "2020"])
     assert second.exit_code == 0 and "current" in ANSI_ESCAPE.sub("", second.stdout) and len(log.log) == reads
+
+
+def test_cli_restore_trajectory_fits_80_columns(restore_cli):
+    # A pipe or an 80-column terminal: every trajectory value prints in full, none is cut to an ellipsis.
+    base, _ = restore_cli
+    result = CliRunner().invoke(app, [*base, "--planted", "2020"], env={"COLUMNS": "80"})
+    assert result.exit_code == 0, (result.output, result.exception)
+    text = ANSI_ESCAPE.sub("", result.stdout)
+    assert "\u2026" not in text
+    table_lines = [line for line in text.splitlines() if line.startswith(("\u2503", "\u2502"))]
+    assert table_lines and max(len(line) for line in table_lines) <= 80
+    rows = [line for line in table_lines if re.match(r"^\u2502 20\d\d \u2502", line)]
+    assert len(rows) == 2 * len({line[2:6] for line in rows}), "both tables have a row per year"
+    for header in ("null dD", "departed chg", "closer to target", "radar-free"):
+        assert header in text, header
 
 
 @pytest.mark.parametrize(

@@ -162,6 +162,12 @@ HISTOGRAM_BINS = 128
 WRITE_CACHE_BYTES = 128 * 2**20
 #: Start of the warning a run records when it could not load its validation reference.
 VALIDATION_SKIPPED = "Validation skipped, the reference could not be loaded"
+#: The caveat in ``validation.json`` when the severity map was scored but the outline reference was not.
+OUTLINE_NOT_SCORED = (
+    "The outline validation (NIFC, or the --reference file) was requested but not done, so this file holds only the "
+    "severity scores; a rerun once the reference loads adds the outline scores without reading the store. "
+    "The reference could not be loaded"
+)
 #: End of the warning a run records when the stop rule trips (:func:`stop_rule`).
 STOP_WARNING = "stop and report (brief section 8)."
 #: Peak memory model (bytes), from synthetic two-zone AOIs of 4.5 and 10.6 million window pixels:
@@ -1172,6 +1178,10 @@ def _validate(
     if state.outline and (state.masks is None or state.info is None):
         ctx.warn(f"{VALIDATION_SKIPPED}: {state.error}")
         validation["error"] = state.error
+        # When the severity map is scored, validation.json is written, and it must say on its own
+        # that the outline was asked for and not scored, not leave that to the report.
+        reference["outline"] = {"scored": False, "error": state.error}
+        caveats.append(f"{OUTLINE_NOT_SCORED}: {state.error}")
         complete = False
     elif state.outline and state.masks is not None and state.info is not None:
         outline = score_against_reference(plan, burned, state.masks, classified)

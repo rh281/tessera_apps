@@ -27,6 +27,7 @@ from tessera_apps.cache import ChunkCache, ChunkKey
 from tessera_apps.io import (
     ALL_LAYERS,
     CountingStore,
+    StoreUnavailableError,
     TesseraError,
     TesseraReader,
     Window,
@@ -410,6 +411,34 @@ def test_open_namespaces_the_callers_cache_and_shares_its_stats(tmp_path, monkey
     assert (mine.hits, mine.misses) == (reader.cache.hits, reader.cache.misses)
     np.testing.assert_array_equal(second.embeddings, first.embeddings)
     assert [p.name for p in tmp_path.iterdir()] == ["SNAP123"]
+
+
+@pytest.mark.parametrize("snapshot", [None, "BOGUS"])
+def test_open_names_the_store_when_icechunk_cannot_open_it(monkeypatch, snapshot):
+    class FakeIcechunkError(Exception):
+        pass
+
+    def refuse(storage):
+        raise FakeIcechunkError(
+            "object store error dispatch failure: CONNECT tunnel failed\n\ncontext:\n   0: icechunk::refs::fetch_branch"
+        )
+
+    fake = types.SimpleNamespace(
+        s3_storage=lambda **kw: kw,
+        Repository=types.SimpleNamespace(open=refuse),
+        IcechunkError=FakeIcechunkError,
+        __version__="0.0-test",
+    )
+    monkeypatch.setitem(sys.modules, "icechunk", fake)
+    with pytest.raises(StoreUnavailableError) as info:
+        TesseraReader.open(snapshot_id=snapshot)
+    message = str(info.value)
+    assert isinstance(info.value, TesseraError) and isinstance(info.value.__cause__, FakeIcechunkError)
+    assert message.startswith("Cannot open the store s3://tessera-embeddings/v1.1/dclimate.icechunk at ")
+    assert "dispatch failure: CONNECT tunnel failed. Check that this machine can reach S3 in us-west-2" in message
+    assert "context" not in message and "icechunk::" not in message
+    assert ("snapshot BOGUS" in message and "tessera-apps info" in message) == (snapshot is not None)
+    assert ("branch 'main'" in message) == (snapshot is None)
 
 
 # ---- cache keying and fetch count ---------------------------------------------------------------
