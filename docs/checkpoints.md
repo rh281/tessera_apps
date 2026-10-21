@@ -712,3 +712,19 @@ What is still untested is the publish itself, which needs the PyPI side set up.
 
    Also create the `pypi` environment in the repository settings.
 3. **Push the tag `v0.1.0`.** A PyPI version can never be reused, so this is a one-way step.
+
+### Released (2026-10-21)
+
+**tessera_apps 0.1.0 is on PyPI**: <https://pypi.org/project/tessera-apps/0.1.0/>, with a wheel and an sdist, licence Apache-2.0, Python 3.12 or later.
+
+**The release run.** The owner made the tag `v0.1.0` as a GitHub release on commit 933da53, because this build session cannot push tags. The run passed CI, the build, the checks and the clean-install tests.
+
+**The first upload failed with `invalid-publisher`.** The PyPI pending publisher named the repository `tessera-apps`; the repository is `tessera_apps`. Nothing reached PyPI. After the owner corrected it (environment `pypi`), a re-run of the failed jobs published both files and attached them to the GitHub release.
+
+**Checked from PyPI** in a clean Python 3.12 virtual environment, with no AWS variables and an empty HOME:
+- `pip install tessera_apps==0.1.0` resolved from PyPI.
+- `tessera-apps --version` printed `tessera-apps 0.1.0`.
+- `tessera-apps info` read the store anonymously.
+- `tessera-apps restore --aoi itapebi --target demo --validate` gave "diverging from control since 2019" and every output, reading 0.77 GB in 33 s.
+
+The repository stays private by the owner's choice, so the PyPI page's links to it give a 404 to anyone without access.
