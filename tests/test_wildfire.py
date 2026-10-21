@@ -26,7 +26,6 @@ import zarr
 from pyproj import Transformer
 from scipy import ndimage
 from shapely.geometry import box, mapping
-from typer.testing import CliRunner
 from zarr.storage import MemoryStore
 
 from tessera_apps import export, metrics, validate
@@ -50,7 +49,7 @@ from tessera_apps.cli import EXIT_USAGE, EXIT_VALIDATION, app
 from tessera_apps.demo import demo_feature
 from tessera_apps.io import FIRST_YEAR, YEARS, TesseraReader, YearsNotPublishedError, plan_aoi, zone_epsg
 
-from .conftest import BOUNDARY, KeyLog, add_zone
+from .conftest import BOUNDARY, KeyLog, PlainCliRunner, add_zone
 
 LON0, LAT0 = BOUNDARY
 
@@ -1245,7 +1244,7 @@ def test_a_bad_severity_file_is_named_before_a_strict_unreachable_outline(
         )
     assert log.chunk_keys() == []
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path / "o")]
-    result = CliRunner().invoke(app, [*args, "--validate", "--strict-validate", "--severity", str(path)])
+    result = PlainCliRunner().invoke(app, [*args, "--validate", "--strict-validate", "--severity", str(path)])
     assert result.exit_code == EXIT_USAGE and "nine.tif" in result.stderr, result.output
     assert log.chunk_keys() == []
 
@@ -1489,7 +1488,7 @@ def test_cli_wildfire_severity_options(cli_wildfire_reader, fixture_aoi, block_s
     aoi_path, _ = fixture_aoi
     out = tmp_path / "cli"
     opts = ["--min-area-ha", "0.05", "--severity", str(block_severity)]
-    result = CliRunner().invoke(app, [*_cli_args(aoi_path, out), *opts, "--severity-min-class", "4"])
+    result = PlainCliRunner().invoke(app, [*_cli_args(aoi_path, out), *opts, "--severity-min-class", "4"])
     assert result.exit_code == 0, (result.output, result.exception)
     text = result.stdout
     flat = " ".join(text.split())  # rich wraps long lines
@@ -1524,7 +1523,7 @@ def test_cli_wildfire_severity_options(cli_wildfire_reader, fixture_aoi, block_s
     assert excluded["unmapped_pixels"] != excluded["non_processing_pixels"]
     assert f"burned pixels outside the map {view['detections_by_class']['unmapped']:.1%}" in flat
     # The default min class is the stop rule's own, so the line does not repeat it.
-    default = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "default"), *opts])
+    default = PlainCliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "default"), *opts])
     assert default.exit_code == 0, default.output
     assert "stop rule" not in " ".join(default.stdout.split())
 
@@ -1535,7 +1534,7 @@ def test_cli_wildfire_prints_a_bracketed_severity_file_name(cli_wildfire_reader,
     named = tmp_path / "s[bold][v2].tif"
     named.write_bytes(block_severity.read_bytes())
     args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05", "--severity", str(named)]
-    result = CliRunner().invoke(app, args)
+    result = PlainCliRunner().invoke(app, args)
     assert result.exit_code == 0, (result.output, result.exception)
     assert "[bold]" in result.stdout and "[v2]" in result.stdout
 
@@ -1548,7 +1547,7 @@ def test_cli_wildfire_prints_the_severity_headline_before_the_outline(
     outline = demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)
     ref.write_text(json.dumps({"type": "Feature", "properties": {}, "geometry": mapping(outline)}))
     args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05"]
-    result = CliRunner().invoke(app, [*args, "--reference", str(ref), "--severity", str(block_severity)])
+    result = PlainCliRunner().invoke(app, [*args, "--reference", str(ref), "--severity", str(block_severity)])
     assert result.exit_code == 0, (result.output, result.exception)
     text = result.stdout
     order = [text.index(k) for k in ("Headline: Severity", "Severity, class 3", "Validation (file): recall inside")]
@@ -1564,9 +1563,9 @@ def test_cli_wildfire_strict_validate_after_a_severity_only_run(
     # unreachable it exits 3 instead of 0.
     aoi_path, _ = fixture_aoi
     args = [*_cli_args(aoi_path, tmp_path / "o"), "--min-area-ha", "0.05", "--severity", str(block_severity)]
-    assert CliRunner().invoke(app, args).exit_code == 0
+    assert PlainCliRunner().invoke(app, args).exit_code == 0
     monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
-    result = CliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
+    result = PlainCliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
     assert result.exit_code == EXIT_VALIDATION, result.output
     assert "services3.arcgis.com" in result.stderr
 
@@ -1580,7 +1579,7 @@ def test_cli_wildfire_strict_validate_after_a_severity_only_run(
 )
 def test_cli_wildfire_bad_severity_exits_2(cli_wildfire_reader, fixture_aoi, tmp_path, extra, message):
     aoi_path, _ = fixture_aoi
-    result = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path), *extra])
+    result = PlainCliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path), *extra])
     assert result.exit_code == EXIT_USAGE and message in result.stderr
     assert not (tmp_path / "wildfire_report.json").exists()
 
@@ -1591,7 +1590,7 @@ def test_cli_wildfire_unusable_severity_file_exits_2_before_reading(
     _, log = caldor_store
     aoi_path, _ = fixture_aoi
     path = _nine(caldor_fixture, tmp_path)
-    result = CliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "o"), "--severity", str(path)])
+    result = PlainCliRunner().invoke(app, [*_cli_args(aoi_path, tmp_path / "o"), "--severity", str(path)])
     assert result.exit_code == EXIT_USAGE and "nine.tif" in result.stderr and "0 to 6" in result.stderr
     assert log.chunk_keys() == []
 
@@ -1606,10 +1605,10 @@ def test_cli_wildfire_passes_the_severity_options(monkeypatch, tmp_path):
     monkeypatch.setattr("tessera_apps.apps.run_wildfire", fake)
     sev = tmp_path / "s.tif"
     args = ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022", "--severity", str(sev)]
-    result = CliRunner().invoke(app, [*args, "--severity-min-class", "2"])
+    result = PlainCliRunner().invoke(app, [*args, "--severity-min-class", "2"])
     assert result.exit_code == EXIT_USAGE
     assert seen["severity"] == sev and seen["severity_min_class"] == 2 and seen["validate"] is False
-    CliRunner().invoke(app, args)
+    PlainCliRunner().invoke(app, args)
     assert seen["severity_min_class"] == 3
 
 

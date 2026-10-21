@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ import numpy as np
 import pytest
 import zarr
 from pyproj import Transformer
+from typer import Typer
+from typer.testing import CliRunner, Result
 from zarr.storage import MemoryStore, WrapperStore
 
 from tessera_apps.io import FIRST_YEAR, N_BANDS, YEARS, TesseraReader, zone_epsg
@@ -633,3 +636,35 @@ def write_polygon(path: Path, geometry: Any, properties: dict[str, Any] | None =
     feature = {"type": "Feature", "properties": properties or {}, "geometry": mapping(geometry)}
     path.write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}), encoding="utf-8")
     return path
+
+
+#: An ANSI escape sequence (colour, bold and the like).
+ANSI_ESCAPE = re.compile(rb"\x1b\[[0-9;]*m")
+
+
+class PlainCliRunner(CliRunner):
+    """A CliRunner whose captured output carries no ANSI escapes.
+
+    Typer and rich colour their output where they detect CI (``GITHUB_ACTIONS``, ``FORCE_COLOR``,
+    ``PY_COLORS``) even when it is captured, and the escape codes split the words the CLI tests
+    match (an option name such as ``--aoi``, a table cell). The tests check words, not colours.
+    """
+
+    def invoke(
+        self,
+        app: Typer,
+        args: str | Sequence[str] | None = None,
+        input: bytes | str | None = None,
+        env: Mapping[str, str | None] | None = None,
+        catch_exceptions: bool = True,
+        color: bool = False,
+        **extra: Any,
+    ) -> Result:
+        result = super().invoke(
+            app, args, input=input, env=env, catch_exceptions=catch_exceptions, color=color, **extra
+        )
+        result.stdout_bytes = ANSI_ESCAPE.sub(b"", result.stdout_bytes)
+        if result.stderr_bytes is not None:
+            result.stderr_bytes = ANSI_ESCAPE.sub(b"", result.stderr_bytes)
+        result.output_bytes = ANSI_ESCAPE.sub(b"", result.output_bytes)
+        return result

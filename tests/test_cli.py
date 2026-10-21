@@ -7,18 +7,24 @@ import re
 import urllib.error
 
 import pytest
-from typer.testing import CliRunner
 
 from tessera_apps import validate
 from tessera_apps.cli import EXIT_USAGE, EXIT_VALIDATION, app
 
-from .conftest import SITE_BOX, TARGET_BOX, KeyLog, grid_polygon, restore_corner, restore_store, write_polygon
-
-ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+from .conftest import (
+    SITE_BOX,
+    TARGET_BOX,
+    KeyLog,
+    PlainCliRunner,
+    grid_polygon,
+    restore_corner,
+    restore_store,
+    write_polygon,
+)
 
 
 def test_help_lists_info():
-    result = CliRunner().invoke(app, ["--help"])
+    result = PlainCliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "info" in result.output
     assert "--version" in result.output
@@ -31,11 +37,11 @@ def test_version_prints_the_package_version_and_exits_0(monkeypatch):
         raise AssertionError("--version must not open the store")
 
     monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(no_store))
-    result = CliRunner().invoke(app, ["--version"])
+    result = PlainCliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0, result.output
     assert result.output == f"tessera-apps {__version__}\n"
     # Eager: it wins over a command given after it, which then never runs.
-    result = CliRunner().invoke(app, ["--version", "info"])
+    result = PlainCliRunner().invoke(app, ["--version", "info"])
     assert result.exit_code == 0, result.output
     assert result.output == f"tessera-apps {__version__}\n"
 
@@ -82,7 +88,7 @@ def _store_unreachable(**kwargs):
 
 def test_info_exits_2_naming_the_reason_when_the_store_cannot_be_opened(monkeypatch):
     monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_store_unreachable))
-    result = CliRunner().invoke(app, ["info"])
+    result = PlainCliRunner().invoke(app, ["info"])
     assert result.exit_code == EXIT_USAGE, result.output
     assert "Error: Cannot open the store" in result.stderr and "no route" in result.stderr
     assert "Traceback" not in result.output
@@ -99,7 +105,7 @@ def test_info_exits_2_on_a_bad_zone(monkeypatch, zone, message):
     zarr.open_group(store, mode="w")
     reader = TesseraReader.from_store(store)
     monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(lambda **kwargs: reader))
-    result = CliRunner().invoke(app, ["info", "--zone", zone])
+    result = PlainCliRunner().invoke(app, ["info", "--zone", zone])
     assert result.exit_code == EXIT_USAGE, result.output
     assert message in result.stderr
 
@@ -116,7 +122,7 @@ def test_info_exits_2_on_a_bad_zone(monkeypatch, zone, message):
 def test_every_app_exits_2_before_writing_when_the_store_cannot_be_opened(monkeypatch, tmp_path, argv):
     monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_store_unreachable))
     out = tmp_path / "out"
-    result = CliRunner().invoke(app, [*argv, "--out", str(out)])
+    result = PlainCliRunner().invoke(app, [*argv, "--out", str(out)])
     assert result.exit_code == EXIT_USAGE, result.output
     assert "Error: Cannot open the store" in result.stderr
     assert not out.exists() or not any(out.iterdir())
@@ -155,10 +161,9 @@ def restore_cli(_restore_mem, tmp_path, monkeypatch):
 
 
 def test_restore_help_lists_its_options():
-    result = CliRunner().invoke(app, ["restore", "--help"], env={"COLUMNS": "200"})
+    result = PlainCliRunner().invoke(app, ["restore", "--help"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
-    # Rich colours the help where it detects CI (GITHUB_ACTIONS), splitting option names with escape codes.
-    text = ANSI_ESCAPE.sub("", result.output)
+    text = result.output
     for option in (
         "--aoi",
         "--site",
@@ -174,10 +179,10 @@ def test_restore_help_lists_its_options():
 
 def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
     base, log = restore_cli
-    runner = CliRunner()
+    runner = PlainCliRunner()
     first = runner.invoke(app, [*base, "--planted", "2020"], env={"COLUMNS": "200"})
     assert first.exit_code == 0, (first.output, first.exception)
-    lines = ANSI_ESCAPE.sub("", first.stdout).splitlines()
+    lines = first.stdout.splitlines()
     assert lines[0] == "Verdict: diverging from control since 2020"
     for text in (
         "Trajectory",
@@ -197,20 +202,20 @@ def test_cli_restore_runs_skips_and_prints_the_verdict(restore_cli, tmp_path):
         "Limitation: There is no global reference layer",
         "GB of chunks",
     ):
-        assert text in ANSI_ESCAPE.sub("", first.stdout), text
+        assert text in first.stdout, text
     report = json.loads((tmp_path / "out" / "restore_report.json").read_text())
     assert report["summary"]["verdict"] == "diverging from control since 2020"
     reads = len(log.log)
     second = runner.invoke(app, [*base, "--planted", "2020"])
-    assert second.exit_code == 0 and "current" in ANSI_ESCAPE.sub("", second.stdout) and len(log.log) == reads
+    assert second.exit_code == 0 and "current" in second.stdout and len(log.log) == reads
 
 
 def test_cli_restore_trajectory_fits_80_columns(restore_cli):
     # A pipe or an 80-column terminal: every trajectory value prints in full, none is cut to an ellipsis.
     base, _ = restore_cli
-    result = CliRunner().invoke(app, [*base, "--planted", "2020"], env={"COLUMNS": "80"})
+    result = PlainCliRunner().invoke(app, [*base, "--planted", "2020"], env={"COLUMNS": "80"})
     assert result.exit_code == 0, (result.output, result.exception)
-    text = ANSI_ESCAPE.sub("", result.stdout)
+    text = result.stdout
     assert "\u2026" not in text
     table_lines = [line for line in text.splitlines() if line.startswith(("\u2503", "\u2502"))]
     assert table_lines and max(len(line) for line in table_lines) <= 80
@@ -234,7 +239,7 @@ def test_cli_restore_trajectory_fits_80_columns(restore_cli):
 )
 def test_cli_restore_usage_errors_exit_2_before_reading(restore_cli, extra, message):
     base, log = restore_cli
-    result = CliRunner().invoke(app, [*base, *extra])
+    result = PlainCliRunner().invoke(app, [*base, *extra])
     assert result.exit_code == EXIT_USAGE, result.output
     assert message in result.output and log.chunk_keys() == []
 
@@ -243,11 +248,11 @@ def test_cli_restore_data_error_exits_2(restore_cli, tmp_path):
     base, log = restore_cli
     left, top = restore_corner()
     small = write_polygon(tmp_path / "small.geojson", grid_polygon(left, top, ((20, 28), (20, 28))))
-    result = CliRunner().invoke(app, [*base, "--planted", "2020", "--control", str(small)])
+    result = PlainCliRunner().invoke(app, [*base, "--planted", "2020", "--control", str(small)])
     assert result.exit_code == EXIT_USAGE and "The control covers 64 pixel centres" in result.output
     assert log.chunk_keys() == []
     # A data error found after the first read (no ring pixel like the site in the match year) also exits 2.
-    late = CliRunner().invoke(app, [*base, "--planted", "2024"])
+    late = PlainCliRunner().invoke(app, [*base, "--planted", "2024"])
     assert late.exit_code == EXIT_USAGE and "Only 0 ring pixels are kept" in late.output
 
 
@@ -266,7 +271,7 @@ def test_cli_restore_forwards_every_option(restore_cli, tmp_path, monkeypatch):
     extra += ["--match-year", "2017"]
     extra += ["--fold-cell-m", "150", "--placebos", "50", "--min-post-years", "2", "--seed", "4", "--no-canopy"]
     extra += ["--validate", "--strict-validate", "--force", "--snapshot", "abc", "--i-know-this-is-large"]
-    result = CliRunner().invoke(app, [*base, *extra])
+    result = PlainCliRunner().invoke(app, [*base, *extra])
     assert result.exit_code == EXIT_USAGE and "stop here" in result.output
     expected = {
         "planted": 2021,
@@ -298,7 +303,7 @@ def test_cli_restore_strict_exits_3_when_the_null_test_cannot_run(restore_cli, t
 
     monkeypatch.setattr(rs, "null_halves", lambda xy, centre, sectors=8: np.zeros(len(xy), dtype=np.int8))
     base, _ = restore_cli
-    runner = CliRunner()
+    runner = PlainCliRunner()
     args = [*base, "--planted", "2020", "--validate", "--no-canopy"]
     strict = runner.invoke(app, [*args, "--strict-validate"])
     assert strict.exit_code == EXIT_VALIDATION and "null test could not run" in strict.output
@@ -311,7 +316,7 @@ def test_cli_restore_strict_exits_3_when_the_null_test_cannot_run(restore_cli, t
 
 def test_cli_restore_canopy_host_unreachable_warns_or_exits_3(restore_cli, tmp_path):
     base, log = restore_cli
-    runner = CliRunner()
+    runner = PlainCliRunner()
     strict = runner.invoke(app, [*base, "--planted", "2020", "--validate", "--strict-validate"])
     assert strict.exit_code == EXIT_VALIDATION, strict.output
     assert "storage.googleapis.com" in strict.output and log.chunk_keys() == []

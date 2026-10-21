@@ -26,7 +26,6 @@ import shapely
 from pyproj import Transformer
 from rio_cogeo.cogeo import cog_validate
 from shapely.geometry import box, mapping
-from typer.testing import CliRunner
 
 from tessera_apps import export, io, metrics, validate
 from tessera_apps.apps import DeforestResult, StrictValidationError, WildfireResult, wetland
@@ -47,7 +46,7 @@ from tessera_apps.io import (
     read_points,
 )
 
-from .conftest import BOUNDARY, fixture_window_lonlat, write_hansen_tiles
+from .conftest import BOUNDARY, PlainCliRunner, fixture_window_lonlat, write_hansen_tiles
 
 RECOVERY_FIELDS = (
     "median_sim_burned",
@@ -318,7 +317,7 @@ def test_cli_wildfire_runs_skips_and_validates(cli_reader, caldor_aoi, hansen_re
     out = tmp_path / "cli_out"
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
     args += ["--min-area-ha", "0.05", "--validate", "--reference", str(hansen_reference)]
-    runner = CliRunner()
+    runner = PlainCliRunner()
     first = runner.invoke(app, args)
     assert first.exit_code == 0, (first.output, first.exception)
     assert "Burned:" in first.stdout and "IoU" in first.stdout and "Recovery" in first.stdout
@@ -343,14 +342,14 @@ def test_cli_wildfire_runs_skips_and_validates(cli_reader, caldor_aoi, hansen_re
 )
 def test_cli_wildfire_usage_errors_exit_2(cli_reader, caldor_aoi, tmp_path, extra, message):
     aoi_path, _ = caldor_aoi
-    result = CliRunner().invoke(app, ["wildfire", "--aoi", str(aoi_path), "--out", str(tmp_path), *extra])
+    result = PlainCliRunner().invoke(app, ["wildfire", "--aoi", str(aoi_path), "--out", str(tmp_path), *extra])
     assert result.exit_code == EXIT_USAGE
     assert message in result.stderr
     assert not (tmp_path / "wildfire_report.json").exists()
 
 
 def test_cli_wildfire_missing_aoi_exits_2(cli_reader, tmp_path):
-    result = CliRunner().invoke(
+    result = PlainCliRunner().invoke(
         app, ["wildfire", "--aoi", str(tmp_path / "nope.geojson"), "--year-a", "2020", "--year-b", "2022"]
     )
     assert result.exit_code == EXIT_USAGE and "neither an existing file" in result.stderr
@@ -365,7 +364,7 @@ def test_cli_wildfire_unreachable_reference_warns(cli_reader, caldor_aoi, tmp_pa
     aoi_path, _ = caldor_aoi
     out = tmp_path / "out"
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
-    result = CliRunner().invoke(app, [*args, "--min-area-ha", "0.05", "--validate"])
+    result = PlainCliRunner().invoke(app, [*args, "--min-area-ha", "0.05", "--validate"])
     assert result.exit_code == 0, result.output
     # The run itself completes, without a validation file, and says why.
     report = json.loads((out / "wildfire_report.json").read_text())
@@ -382,7 +381,7 @@ def test_cli_wildfire_strict_validate_stops_before_reading(cli_reader, caldor_st
     aoi_path, _ = caldor_aoi
     out = tmp_path / "out"
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
-    result = CliRunner().invoke(app, [*args, "--min-area-ha", "0.05", "--validate", "--strict-validate"])
+    result = PlainCliRunner().invoke(app, [*args, "--min-area-ha", "0.05", "--validate", "--strict-validate"])
     assert result.exit_code == EXIT_VALIDATION, result.output
     assert "--strict-validate" in result.stderr and "services3.arcgis.com" in result.stderr
     assert log.chunk_keys() == [] and not (out / "wildfire_report.json").exists()
@@ -563,7 +562,7 @@ def test_cli_wildfire_bad_reference_exits_2(cli_reader, caldor_store, caldor_aoi
     bad = tmp_path / "perimeter.geojson"
     bad.write_text("<html>404</html>")
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path / "o")]
-    result = CliRunner().invoke(app, [*args, "--reference", str(bad)])
+    result = PlainCliRunner().invoke(app, [*args, "--reference", str(bad)])
     assert result.exit_code == EXIT_USAGE, result.output
     assert "perimeter.geojson" in result.stderr
     assert log.chunk_keys() == []
@@ -575,7 +574,7 @@ def test_cli_wildfire_unwritable_out_exits_2(cli_reader, caldor_store, caldor_ao
     blocker = tmp_path / "results.txt"
     blocker.write_text("a file, not a directory")
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(blocker / "out")]
-    result = CliRunner().invoke(app, args)
+    result = PlainCliRunner().invoke(app, args)
     assert result.exit_code == EXIT_USAGE, result.output
     assert "--out" in result.stderr and "results.txt" in result.stderr
     assert log.chunk_keys() == []
@@ -626,8 +625,8 @@ def test_cli_wildfire_redone_validation_message(cli_reader, caldor_aoi, fake_nif
     out = tmp_path / "out"
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
     args += ["--min-area-ha", "0.05"]
-    assert CliRunner().invoke(app, args).exit_code == 0
-    result = CliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
+    assert PlainCliRunner().invoke(app, args).exit_code == 0
+    result = PlainCliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
     assert result.exit_code == 0, result.output
     assert "validation was redone" in result.stdout and "IoU" in result.stdout
 
@@ -638,11 +637,11 @@ def test_cli_wildfire_store_errors_exit_2_with_notes(monkeypatch, boundary_reade
     lon0, lat0 = BOUNDARY
     aoi = _feature_collection(tmp_path / "a.geojson", box(lon0 - 0.004, lat0 - 0.003, lon0 + 0.003, lat0 + 0.003), {})
     args = ["wildfire", "--aoi", str(aoi), "--out", str(tmp_path / "o")]
-    missing = CliRunner().invoke(app, [*args, "--year-a", "2024", "--year-b", "2025"])
+    missing = PlainCliRunner().invoke(app, [*args, "--year-a", "2024", "--year-b", "2025"])
     assert missing.exit_code == EXIT_USAGE, missing.output
     assert "11N: 2023" in missing.stderr and "--threshold" in missing.stderr
     big = _feature_collection(tmp_path / "big.geojson", box(-121.5, 38.0, -120.0, 39.0), {})
-    large = CliRunner().invoke(app, ["wildfire", "--aoi", str(big), "--year-a", "2020", "--year-b", "2022"])
+    large = PlainCliRunner().invoke(app, ["wildfire", "--aoi", str(big), "--year-a", "2020", "--year-b", "2022"])
     assert large.exit_code == EXIT_USAGE and "10,000 km2 limit" in large.stderr
 
 
@@ -667,7 +666,7 @@ def test_cli_wildfire_forwards_every_option(monkeypatch, tmp_path):
     args += ["--reference", str(ref), "--fire-year", "2020", "--fire-name", "Caldor", "--threshold", "0.3"]
     args += ["--min-area-ha", "2.5", "--recovery-through", "2024", "--force", "--snapshot", "SNAP"]
     args += ["--i-know-this-is-large", "--strict-validate"]
-    result = CliRunner().invoke(app, args)
+    result = PlainCliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     assert seen["aoi"] == "caldor" and (seen["year_a"], seen["year_b"], seen["out"]) == (2019, 2021, tmp_path)
     assert seen["validate"] is True and seen["reference"] == ref  # --reference implies --validate
@@ -676,14 +675,14 @@ def test_cli_wildfire_forwards_every_option(monkeypatch, tmp_path):
     assert seen["min_area_ha"] == 2.5 and seen["recovery_through"] == 2024 and seen["strict_validate"] is True
     # Defaults: the 10,000 km2 limit, no snapshot, no force, no validation.
     seen.clear()
-    defaults = CliRunner().invoke(app, ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022"])
+    defaults = PlainCliRunner().invoke(app, ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022"])
     assert defaults.exit_code == 0, defaults.output
     assert seen["max_area_km2"] == 10_000 and seen["snapshot_id"] is None and seen["force"] is False
     assert seen["validate"] is False and seen["strict_validate"] is False and seen["out"] == Path("out")
     # A strict run whose validation was not written still exits 3.
     written["value"] = False
     base = ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022", "--out", str(tmp_path)]
-    strict = CliRunner().invoke(app, [*base, "--validate", "--strict-validate"])
+    strict = PlainCliRunner().invoke(app, [*base, "--validate", "--strict-validate"])
     assert strict.exit_code == EXIT_VALIDATION
 
 
@@ -1154,7 +1153,7 @@ def test_cli_deforest_runs_skips_and_validates(cli_reader, deforest_aoi, defores
     out = tmp_path / "cli_out"
     args = ["deforest", "--aoi", str(aoi_path), "--year-a", "2019", "--year-b", "2022", "--out", str(out), "--validate"]
     args += ["--label-ring-km", "0.1", "--labels-per-class", "100", "--min-area-ha", "0.05"]
-    runner = CliRunner()
+    runner = PlainCliRunner()
     first = runner.invoke(app, args)
     assert first.exit_code == 0, (first.output, first.exception)
     for text in (
@@ -1202,7 +1201,7 @@ def test_cli_deforest_errors_exit_2_before_reading(cli_reader, caldor_store, def
         (["--year-a", "2019", "--year-b", "2022", "--forest-prob", "1.5"], "forest_prob"),
     ]
     for extra, message in cases:
-        result = CliRunner().invoke(app, [*base, *extra])
+        result = PlainCliRunner().invoke(app, [*base, *extra])
         assert result.exit_code == EXIT_USAGE, (extra, result.output)
         assert message in result.stderr, (extra, result.stderr)
     assert log.chunk_keys() == [] and not (tmp_path / "o" / "deforest_report.json").exists()
@@ -1222,11 +1221,11 @@ def test_cli_deforest_data_errors_exit_2_before_reading(
     )
     monkeypatch.setenv("TESSERA_APPS_CACHE", str(tmp_path / "cache"))
     monkeypatch.setattr(validate, "HANSEN_URL_TEMPLATE", water)
-    on_water = CliRunner().invoke(app, args)
+    on_water = PlainCliRunner().invoke(app, args)
     assert on_water.exit_code == EXIT_USAGE, (on_water.output, on_water.exception)
     assert "no land pixel" in on_water.stderr and "--labels" in on_water.stderr
     monkeypatch.setattr(validate, "hansen_layer", _unreachable_hansen)
-    unreachable = CliRunner().invoke(app, args)
+    unreachable = PlainCliRunner().invoke(app, args)
     assert unreachable.exit_code == EXIT_USAGE, (unreachable.output, unreachable.exception)
     assert "storage.googleapis.com" in unreachable.stderr and "--labels" in unreachable.stderr
     assert log.chunk_keys() == [] and not (tmp_path / "o" / "deforest_report.json").exists()
@@ -1252,10 +1251,10 @@ def test_cli_deforest_prints_brackets_in_names(cli_reader, caldor_reader, caldor
     args = ["deforest", "--aoi", str(aoi_path), "--year-a", "2019", "--year-b", "2022", "--out", str(out)]
     args += ["--labels", str(csv), "--min-area-ha", "0.05"]
     env = {"COLUMNS": "400"}
-    first = CliRunner().invoke(app, args, env=env)
+    first = PlainCliRunner().invoke(app, args, env=env)
     assert first.exit_code == 0, (first.output, first.exception)
     assert "Labels: pts [draft].csv (96 rows" in first.stdout and str(aoi_path) in first.stdout
-    again = CliRunner().invoke(app, args, env=env)
+    again = PlainCliRunner().invoke(app, args, env=env)
     assert again.exit_code == 0, (again.output, again.exception)
     assert f"Outputs in {out} are current" in again.stdout
 
@@ -1270,11 +1269,11 @@ def test_cli_deforest_strict_validate_stops_before_reading(
     out = tmp_path / "out"
     args = ["deforest", "--aoi", str(aoi_path), "--year-a", "2019", "--year-b", "2022", "--out", str(out)]
     args += ["--label-ring-km", "0.1", "--labels-per-class", "100", "--validate"]
-    strict = CliRunner().invoke(app, [*args, "--strict-validate"])
+    strict = PlainCliRunner().invoke(app, [*args, "--strict-validate"])
     assert strict.exit_code == EXIT_VALIDATION, strict.output
     assert "--strict-validate" in strict.stderr and "storage.googleapis.com" in strict.stderr
     assert log.chunk_keys() == [] and not (out / "deforest_report.json").exists()
-    relaxed = CliRunner().invoke(app, args)
+    relaxed = PlainCliRunner().invoke(app, args)
     assert relaxed.exit_code == 0, relaxed.output
     assert "Validation: not done" in relaxed.stdout and not (out / "deforest_validation.json").exists()
 
@@ -1302,7 +1301,7 @@ def test_cli_deforest_forwards_every_option(monkeypatch, tmp_path):
     args += ["--label-ring-km", "7.5", "--forest-cover", "60", "--nonforest-cover", "15", "--forest-prob", "0.6"]
     args += ["--stable-percentile", "90", "--min-area-ha", "1.5", "--hansen-version", "GFC-2024-v1.12", "--seed", "4"]
     args += ["--force", "--snapshot", "SNAP", "--i-know-this-is-large", "--strict-validate"]
-    result = CliRunner().invoke(app, args)
+    result = PlainCliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     assert seen["aoi"] == "rondonia" and (seen["year_a"], seen["year_b"], seen["out"]) == (2019, 2022, tmp_path)
     assert seen["validate"] is True and seen["reference"] == ref and seen["labels"] == labels
@@ -1312,7 +1311,7 @@ def test_cli_deforest_forwards_every_option(monkeypatch, tmp_path):
     assert seen["seed"] == 4 and seen["force"] is True and seen["snapshot_id"] == "SNAP"
     assert seen["max_area_km2"] is None and seen["strict_validate"] is True
     seen.clear()
-    defaults = CliRunner().invoke(app, ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022"])
+    defaults = PlainCliRunner().invoke(app, ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022"])
     assert defaults.exit_code == 0, defaults.output
     assert seen["validate"] is False and seen["reference"] is None and seen["labels"] is None
     assert (seen["labels_per_class"], seen["label_chunks"], seen["label_ring_km"]) == (500, 24, 5.0)
@@ -1600,7 +1599,7 @@ def test_cli_wetland_runs_skips_and_validates(cli_reader, wetland_inputs, tmp_pa
     args = ["wetland", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
     args += ["--seeds", str(seeds_path), "--shoreline", str(shore), "--coast-km", "0.1", "--validate"]
     args += ["--min-area-ha", "0.05", "--seed-buffer-m", "30", "--fold-cell-m", "50"]
-    runner = CliRunner()
+    runner = PlainCliRunner()
     first = runner.invoke(app, args, env={"COLUMNS": "200"})
     assert first.exit_code == 0, (first.output, first.exception)
     for text in (
@@ -1650,7 +1649,7 @@ def test_cli_wetland_errors_exit_2_before_reading(cli_reader, caldor_store, wetl
         ([*ok, "--reference-source", "gmw", "--gmw-version", "v3.1"], "gmw_version"),
     ]
     for extra, message in cases:
-        result = CliRunner().invoke(app, [*base, *extra], env={"COLUMNS": "300"})
+        result = PlainCliRunner().invoke(app, [*base, *extra], env={"COLUMNS": "300"})
         assert result.exit_code == EXIT_USAGE, (extra, result.output)
         assert message in result.stderr, (extra, result.stderr)
     assert log.chunk_keys() == [] and not (tmp_path / "o" / "wetland_report.json").exists()
@@ -1673,7 +1672,7 @@ def test_cli_wetland_data_errors_exit_2(cli_reader, caldor_fixture, caldor_store
         (["--aoi", str(aoi_path), "--seeds", str(nodata_seeds)], wetland.WetlandError, "seed pixels are usable"),
     ]
     for extra, error, message in cases:
-        result = CliRunner().invoke(app, ["wetland", *years, *extra, "--out", str(tmp_path / "o")])
+        result = PlainCliRunner().invoke(app, ["wetland", *years, *extra, "--out", str(tmp_path / "o")])
         assert issubclass(error, io.TesseraError)
         assert result.exit_code == EXIT_USAGE, (extra, result.output, result.exception)
         assert "Error:" in result.stderr and message in result.stderr, (extra, result.stderr)
@@ -1692,11 +1691,11 @@ def test_cli_wetland_strict_validate_stops_before_reading(
     out = tmp_path / "out"
     args = ["wetland", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
     args += ["--seeds", str(seeds_path), "--shoreline", str(shore), "--validate", "--min-area-ha", "0.05"]
-    strict = CliRunner().invoke(app, [*args, "--strict-validate"])
+    strict = PlainCliRunner().invoke(app, [*args, "--strict-validate"])
     assert strict.exit_code == EXIT_VALIDATION, strict.output
     assert "--strict-validate" in strict.stderr and "esa-worldcover" in strict.stderr
     assert log.chunk_keys() == [] and not (out / "wetland_report.json").exists()
-    relaxed = CliRunner().invoke(app, args)
+    relaxed = PlainCliRunner().invoke(app, args)
     assert relaxed.exit_code == 0, relaxed.output
     assert "Validation: not done" in relaxed.stdout and not (out / "wetland_validation.json").exists()
 
@@ -1728,7 +1727,7 @@ def test_cli_wetland_forwards_every_option(monkeypatch, tmp_path):
     args += ["--fold-cell-m", "500"]
     args += ["--shoreline", str(shore), "--coast-km", "2.5", "--seed", "7", "--force", "--snapshot", "SNAP"]
     args += ["--i-know-this-is-large", "--strict-validate"]
-    result = CliRunner().invoke(app, args)
+    result = PlainCliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     assert seen["aoi"] == "everglades" and (seen["year_a"], seen["year_b"], seen["out"]) == (2020, 2024, tmp_path)
     assert seen["seeds"] == "my_seeds.gpkg" and seen["validate"] is True and seen["reference"] == ref
@@ -1740,7 +1739,7 @@ def test_cli_wetland_forwards_every_option(monkeypatch, tmp_path):
     assert seen["force"] is True and seen["snapshot_id"] == "SNAP" and seen["max_area_km2"] is None
     assert seen["strict_validate"] is True
     seen.clear()
-    defaults = CliRunner().invoke(app, ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024"])
+    defaults = PlainCliRunner().invoke(app, ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024"])
     assert defaults.exit_code == 0, defaults.output
     # --aoi everglades with no --seeds: run_wetland takes the bundled everglades seeds (seeds None).
     assert seen["seeds"] is None and seen["validate"] is False and seen["reference"] is None

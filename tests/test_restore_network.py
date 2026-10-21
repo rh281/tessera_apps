@@ -13,12 +13,13 @@ import os
 from collections.abc import Iterator
 
 import pytest
-from typer.testing import CliRunner
 
 from tessera_apps import demo, validate
 from tessera_apps.apps import restore as rs
 from tessera_apps.cli import app
 from tessera_apps.io import TesseraReader
+
+from .conftest import PlainCliRunner
 
 pytestmark = pytest.mark.network
 
@@ -63,7 +64,7 @@ def reachable(live_env) -> None:
 def test_the_itapebi_demo_runs_end_to_end_with_validation(reachable, tmp_path):
     out = tmp_path / "out"
     args = ["restore", "--aoi", "itapebi", "--target", "demo", "--validate", "--out", str(out)]
-    result = CliRunner().invoke(app, args, env={"COLUMNS": "200"})
+    result = PlainCliRunner().invoke(app, args, env={"COLUMNS": "200"})
     assert result.exit_code == 0, (result.output, result.exception)
     for name in OUTPUTS:
         assert (out / name).is_file(), name
