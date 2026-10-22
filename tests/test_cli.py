@@ -94,6 +94,38 @@ def test_info_exits_2_naming_the_reason_when_the_store_cannot_be_opened(monkeypa
     assert "Traceback" not in result.output
 
 
+def _another_dataset(**kwargs):
+    from tessera_apps.io import DatasetMismatchError
+
+    raise DatasetMismatchError("1.1-cambridge")
+
+
+def test_info_exits_2_naming_the_dataset_geotessera_found(monkeypatch):
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_another_dataset))
+    result = PlainCliRunner().invoke(app, ["info"])
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "as dataset 1.1-cambridge, not 1.1-dclimate" in result.stderr
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["deforest", "--aoi", "rondonia", "--year-a", "2019", "--year-b", "2022"],
+        ["wetland", "--aoi", "everglades", "--year-a", "2020", "--year-b", "2024"],
+        ["wildfire", "--aoi", "caldor", "--year-a", "2020", "--year-b", "2022"],
+        ["restore", "--aoi", "itapebi"],
+    ],
+)
+def test_every_app_exits_2_before_writing_when_the_store_is_another_dataset(monkeypatch, tmp_path, argv):
+    monkeypatch.setattr("tessera_apps.io.TesseraReader.open", staticmethod(_another_dataset))
+    out = tmp_path / "out"
+    result = PlainCliRunner().invoke(app, [*argv, "--out", str(out)])
+    assert result.exit_code == EXIT_USAGE, result.output
+    assert "as dataset 1.1-cambridge, not 1.1-dclimate" in result.stderr
+    assert not out.exists() or not any(out.iterdir())
+
+
 @pytest.mark.parametrize(("zone", "message"), [("99X", "is malformed"), ("59S", "Zone group 59S is not in the store")])
 def test_info_exits_2_on_a_bad_zone(monkeypatch, zone, message):
     import zarr

@@ -728,3 +728,70 @@ What is still untested is the publish itself, which needs the PyPI side set up.
 - `tessera-apps restore --aoi itapebi --target demo --validate` gave "diverging from control since 2019" and every output, reading 0.77 GB in 33 s.
 
 The repository stays private by the owner's choice, so the PyPI page's links to it give a 404 to anyone without access.
+
+## 0.2.0, checkpoint A: every embedding read goes through geotessera (2026-10-22)
+
+**Item 1 of the handoff cannot be done from this build environment.** NIFC, MTBS, Global Mangrove Watch (Zenodo, JAXA), EFFIS and USFS still answer 403 at its proxy, so the real-reference validation needs a machine that can reach them. Everything else in the handoff goes ahead here.
+
+### Built
+
+- **`geotessera>=0.11,<0.12` is a dependency.** The lock gains 36 packages (geotessera 0.11.0, dask, folium, contextily, scikit-image, obstore, aiohttp and others); no existing pin moved.
+- **`TesseraReader.open` opens `GeoTesseraZarr(store_url="s3://tessera-embeddings/v1.1/dclimate.icechunk")`** and, before any chunk read, requires `gt.dataset.name == "1.1-dclimate"`; anything else raises `DatasetMismatchError`, exit code 2. Every report records `libraries.geotessera` (never null again) and a `store` block with `url`, `dataset`, `model_version`, `build_version` and the snapshot read.
+- **Every chunk read goes through geotessera.** Zone discovery, `years_complete` (`IcechunkStore.incomplete_years()`) and the reads themselves (`IcechunkStore.zone_arrays`, the merged zone view `GeoTesseraZarr.open_zone` returns) come from geotessera. The reader translates its per-hemisphere windows onto geotessera's merged zone grid from the `spatial:transform` attributes, and transposes embeddings back to band-last. Nothing is dequantised. The observation-count layers come from the same zone view, since the library exposes them only there.
+- **The int8 cosine path, the public API, the per-hemisphere grids and masks, chunk-aligned blocks and the year checks before any read are unchanged.**
+- **Tests open their synthetic stores the production way:** each in-memory store is copied into a local Icechunk repository and opened through geotessera. Chunk-key logging still sees the reader's real reads.
+
+**Where this differs from the handoff, and why.** geotessera 0.11.0 cannot do two things the handoff assumes:
+
+- **A store object as `store_url`.** `GeoTesseraZarr` does accept a zarr `Store` instance, but for one it takes the plain Zarr path (`utmNN` groups, `dataset` None), not Icechunk, so a byte-counting wrapper cannot be passed that way.
+- **Snapshot pinning.** `GeoTesseraZarr` has no snapshot or branch argument, and a pre-built `IcechunkStore` cannot be passed as `store_url`.
+
+So the reads run through geotessera's public `IcechunkStore` class, the object `GeoTesseraZarr` uses inside. It is opened at the snapshot pinned with `--snapshot`, or at the head as it stands when the run opens, which makes every run reproducible, and its public `root` goes through the byte counter. `gt._icechunk` is never touched.
+
+An issue asking geotessera for `snapshot_id` and `branch` arguments, an `IcechunkStore` or store-wrapper hook, and a faster `ZoneArray` read is drafted in `docs/geotessera-upstream-issue.md` for the owner to file. With the first two, the reads move onto `GeoTesseraZarr` itself.
+
+### Numbers: the checkpoint answer
+
+All four demos, plus the two negative stands and the 2020 to 2021 wetland run, were run with the new reader at snapshot `RC6FS07ZB0T76EXT8XRG`, the one the 0.1.0 outputs were made at.
+
+- **Every output file is byte-identical to 0.1.0**: every COG band and overview, every table cell, every validation file and preview. Only the reports differ, and only in timings, digests, byte counts and the new `store` and `libraries` fields.
+- **All 201 numbers in this file that those outputs carry reproduce**, including checkpoint 1's read of Caldor (identical arrays, 4.00 GB) and its 40-point read (39 chunks, 313,489,308 B under both readers).
+
+The cost is time. Bytes read are the same to within 0.01%. The reader no longer counts the `zarr.json` metadata documents, which Icechunk serves from the snapshot it already holds. Wall time against 0.1.0 run in the same session:
+
+| Demo | Bytes 0.1.0 | Bytes 0.2.0 | Wall 0.1.0 | Wall 0.2.0 | Peak memory 0.1.0 / 0.2.0 |
+|---|---|---|---|---|---|
+| wildfire (Caldor) | 23,025,595,803 | 23,025,809,926 | 484 s | 725 s (+50%) | 5.38 / 4.21 GB |
+| deforest (Rondonia) | 1,550,430,273 | 1,550,387,529 | 81 s | 85 s (+5%) | 1.64 / 1.92 GB |
+| wetland (Everglades) | 2,368,363,379 | 2,368,295,436 | 48 s | 71 s (+49%) | 1.68 / 1.92 GB |
+| restore (Itapebi) | 766,135,810 | 766,084,085 | 18 s | 33 s (+82%) | 1.21 / 1.42 GB |
+| restore (Jaru) | 1,025,242,856 | 1,025,187,202 | 25 s | 44 s (+80%) | 1.72 / 1.78 GB |
+| checkpoint 1 read (one year) | 4.00 GB | 4.00 GB | 61 to 70 s | 187 to 355 s | 1.25 / 1.29 GB |
+
+**Most of the extra time is CPU in geotessera's merged view.** Its `ZoneArray` allocates a full output and fills it with a fancy-indexed assignment of a transposed block, and the reader then transposes it back. One 512 x 2048 block costs 1.7 to 2.7 times the CPU of a direct zarr read. The drafted upstream issue proposes a slice fast path and an output-order argument.
+
+**Memory.** Embeddings are now read in strips of whole chunk rows into one preallocated array, with at most four embeddings reads in flight, which keeps the read itself near 0.1.0's memory. Deforest and wetland still peaked about 0.3 GB higher, so their per-block memory term rose from 210 to 360 bytes per pixel-year. Their estimates are now 1.94 and 2.02 GB.
+
+### How it was checked
+
+**Build and review.** One agent built the reader. Three lenses reviewed it (byte identity and translation, framework and performance, test strength with mutants on a copy), and a skeptic per lens tried to refute each finding: 15 findings, 12 confirmed or partly confirmed, 3 refuted. All 12 were fixed, each with a test that fails without its fix. The most important:
+
+- a zone with only a south group could wrap a read past the equator to the zone's bottom rows;
+- the limit on concurrent embeddings reads did not cap memory for the 1 to 4 year reads the apps make;
+- the build version recorded was the head's, not the pinned snapshot's;
+- the geotessera version was missing from the rerun digest.
+
+**Demo.** A demo agent then ran every demo and compared every file against the 0.1.0 outputs, and against a 0.1.0 control run in the same session for timing.
+
+**Final checks.** 1,198 offline tests pass (up from 1,165; the suite takes 9 minutes against 7). ruff and mypy are clean. The network tier is as before: the 8 tests on reachable hosts pass (the four live app windows, the Itapebi restore demo, Hansen, Natural Earth, WorldCover), and the 4 on blocked hosts (NIFC, EFFIS, Zenodo, USFS) fail with the 403.
+
+### Surprises
+
+- **The store's head moved four times in a week:** `B6AFRJGX5XQC0A716PA0`, `RC6FS07ZB0T76EXT8XRG`, `4VS54EAWZK79M1WXVCTG`, `23XVEH2WHSRCS8237E8G`. Unpinned runs now record the snapshot they read, but comparisons across days need `--snapshot`.
+- **Pre-`B6AFRJGX` snapshots.** For snapshots older than `B6AFRJGX`, geotessera serves the north group's bottom row from neither hemisphere, because those snapshots register the transform at the pixel centre. The reader now refuses such reads; 0.1.0 read them. The current snapshots are unaffected.
+- **`read_region_quantized` cannot serve the apps' blocks.** It reads one lon/lat box in one zone, with no observation counts and no chunk alignment, so the reader uses the zone arrays instead.
+
+### What should change next
+
+- **File the drafted geotessera issue.** Once the library takes a snapshot and an `IcechunkStore` or store wrapper, move the reads onto `GeoTesseraZarr` itself and drop the subclass.
+- **Item 1** (real NIFC, MTBS, GMW and EFFIS references) needs a machine that can reach those hosts.

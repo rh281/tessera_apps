@@ -275,18 +275,33 @@ EQ_CHUNK = 32
 
 
 def _add_live_zone(root: zarr.Group, zone: str, registration: str) -> None:
-    """A zone group with the live dimensions and attributes, holding data only in its EQ window in 2020."""
+    """A zone group with the live dimensions and attributes, holding data only in its EQ window in 2020.
+
+    Like the live groups it has a time coordinate, ``spatial:shape`` and named dimensions, which
+    geotessera builds its merged zone view from.
+    """
     _, height = LIVE[zone[-1]]
     g = root.create_group(zone)
-    g.attrs.update({**live_attrs(zone, registration), "years_complete": [EQ_YEAR]})
+    g.attrs.update(
+        {**live_attrs(zone, registration), "spatial:shape": [height, LIVE_WIDTH], "years_complete": [EQ_YEAR]}
+    )
     n = len(YEARS)
     t = YEARS.index(EQ_YEAR)
+    time = g.create_array("time", shape=(n,), dtype="int64", fill_value=0, dimension_names=("time",))
+    time[:] = np.array([f"{y}-01-01" for y in YEARS], dtype="datetime64[ns]").astype(np.int64)
+    time.attrs["units"] = "nanoseconds since 1970-01-01"
     r0, r1 = EQ_ROWS[zone]
     c0, c1 = EQ_COLS
     rr, cc = np.meshgrid(np.arange(r0, r1), np.arange(c0, c1), indexing="ij")
     c = EQ_CHUNK
+    dims = ("time", "northing", "easting")
     emb = g.create_array(
-        "embeddings", shape=(n, height, LIVE_WIDTH, N_BANDS), dtype="int8", fill_value=0, chunks=(1, c, c, N_BANDS)
+        "embeddings",
+        shape=(n, height, LIVE_WIDTH, N_BANDS),
+        dtype="int8",
+        fill_value=0,
+        chunks=(1, c, c, N_BANDS),
+        dimension_names=(*dims, "band"),
     )
     block = np.full((r1 - r0, c1 - c0, N_BANDS), 7, dtype=np.int8)
     block[..., 0] = EQ_MARKER[zone]
@@ -294,11 +309,18 @@ def _add_live_zone(root: zarr.Group, zone: str, registration: str) -> None:
     block[..., 2] = cc % 100
     emb[t, r0:r1, c0:c1, :] = block
     scales = g.create_array(
-        "scales", shape=(n, height, LIVE_WIDTH), dtype="float32", fill_value=np.nan, chunks=(1, c, c)
+        "scales",
+        shape=(n, height, LIVE_WIDTH),
+        dtype="float32",
+        fill_value=np.nan,
+        chunks=(1, c, c),
+        dimension_names=dims,
     )
     scales[t, r0:r1, c0:c1] = np.full((r1 - r0, c1 - c0), 0.01, dtype=np.float32)
     for name, value in (("s2_obs_count", 50), ("s1_asc_obs_count", 30), ("s1_desc_obs_count", 0)):
-        arr = g.create_array(name, shape=(n, height, LIVE_WIDTH), dtype="uint16", fill_value=0, chunks=(1, c, c))
+        arr = g.create_array(
+            name, shape=(n, height, LIVE_WIDTH), dtype="uint16", fill_value=0, chunks=(1, c, c), dimension_names=dims
+        )
         arr[t, r0:r1, c0:c1] = np.full((r1 - r0, c1 - c0), value, dtype=np.uint16)
 
 
@@ -327,24 +349,40 @@ def test_equator_store_has_the_live_grids(equator_reader):
     assert s.rowcol(x, 10_000_000.0)[0] == 1472
 
 
-def test_points_on_the_equator_are_read_from_the_south_group(equator_reader):
-    lats = [0.0, -0.0, 1e-9, -1e-9]
-    pts = read_points(equator_reader, [EQ_LON] * 4, lats, EQ_YEAR)
-    assert pts.zones == ["32S", "32S", "32N", "32S"]
+def _registration(request: pytest.FixtureRequest) -> str:
+    """The ``equator_reader`` parameter of the running test: ``corner`` or ``centre``."""
+    return str(request.node.callspec.params["equator_reader"])
+
+
+#: What a read of a pre-fix north group's bottom chunk row raises: geotessera 0.11 takes the row's
+#: pixel centre from the stored transform, finds it on the equator and serves it from neither group.
+PRE_FIX_REFUSAL = "Snapshots before B6AFRJGX5XQC0A716PA0"
+
+
+def test_points_on_the_equator_are_read_from_the_south_group(equator_reader, request):
+    lats = [0.0, -0.0, -1e-9]
+    pts = read_points(equator_reader, [EQ_LON] * 3, lats, EQ_YEAR)
+    assert pts.zones == ["32S", "32S", "32S"]
     assert pts.valid.all()
     x, _ = equator_reader.grid("32N").from_lonlat().transform(EQ_LON, 0.0)
     col = int((x - LIVE_LEFT) // 10)
     # lat 0 and -0 land in S row 1472, the pixel just south of the equator, like lat -1e-9.
     np.testing.assert_array_equal(pts.embeddings[0, :3], _expected("32S", 1472, col))
     np.testing.assert_array_equal(pts.embeddings[1, :3], _expected("32S", 1472, col))
-    np.testing.assert_array_equal(pts.embeddings[3], pts.embeddings[0])
-    # lat 1e-9 is the N group's bottom row.
-    np.testing.assert_array_equal(pts.embeddings[2, :3], _expected("32N", 933_887, col))
+    np.testing.assert_array_equal(pts.embeddings[2], pts.embeddings[0])
     assert pts.radar_present is not None and pts.radar_present.all()
+    # lat 1e-9 is the N group's bottom row.
+    if _registration(request) == "centre":
+        with pytest.raises(TesseraError, match=PRE_FIX_REFUSAL):
+            read_points(equator_reader, [EQ_LON], [1e-9], EQ_YEAR)
+        return
+    north = read_points(equator_reader, [EQ_LON], [1e-9], EQ_YEAR)
+    assert north.zones == ["32N"] and north.valid.all()
+    np.testing.assert_array_equal(north.embeddings[0, :3], _expected("32N", 933_887, col))
 
 
 @pytest.mark.parametrize("zone", ["32N", "32S"])
-def test_points_near_the_equator_hit_their_pixel(equator_reader, zone):
+def test_points_near_the_equator_hit_their_pixel(equator_reader, zone, request):
     # Points a quarter pixel in from each corner, so a half-pixel origin error moves them to a neighbour.
     grid = equator_reader.grid(zone)
     rows = [933_884, 933_887] if zone == "32N" else [1_472, 1_475, 1_503]
@@ -353,11 +391,42 @@ def test_points_near_the_equator_hit_their_pixel(equator_reader, zone):
     xs = LIVE_LEFT + (c + fx) * 10.0
     ys = LIVE[zone[-1]][0] - (r + fy) * 10.0
     lons, lats = grid.to_lonlat().transform(xs, ys)
+    if zone == "32N" and _registration(request) == "centre":
+        # Both rows are in the group's bottom chunk row, which holds the row geotessera cannot place.
+        with pytest.raises(TesseraError, match=PRE_FIX_REFUSAL):
+            read_points(equator_reader, lons, lats, EQ_YEAR, with_radar=False)
+        return
     pts = read_points(equator_reader, lons, lats, EQ_YEAR, with_radar=False)
     assert set(pts.zones) == {zone}
     assert pts.valid.all()
     expect = np.stack([_expected(zone, int(ri), int(ci)) for ri, ci in zip(r, c, strict=True)])
     np.testing.assert_array_equal(pts.embeddings[:, :3], expect)
+
+
+def test_south_rows_north_of_the_equator_come_from_the_north_group(equator_reader, request):
+    # A 32S window over rows 1440 to 1504: rows 1440 to 1471 lie north of the equator, and geotessera
+    # serves them from 32N (the same ground pixels, rows 933856 to 933887 there), the rest from 32S.
+    assert equator_reader.own_rows("32S") == (1472, LIVE["S"][1])
+    rows, cols = slice(1440, 1504), slice(*EQ_COLS)
+    if _registration(request) == "centre":
+        assert equator_reader.own_rows("32N") == (0, LIVE["N"][1] - 1)
+    else:
+        assert equator_reader.own_rows("32N") == (0, LIVE["N"][1])
+    win = equator_reader.read_window("32S", EQ_YEAR, rows, cols)
+    assert win.embeddings is not None
+    south = win.embeddings[32:]
+    assert (south[..., 0] == EQ_MARKER["32S"]).all() and np.isfinite(win.scales[32:]).all()
+    north = win.embeddings[:32]
+    if _registration(request) == "centre":
+        # The N row on the equator (S row 1471) is served by neither group, so it reads as no data.
+        assert np.isnan(win.scales[31]).all() and (north[31] == 0).all()
+        north, scales = north[:31], win.scales[:31]
+    else:
+        scales = win.scales[:32]
+    assert (north[..., 0] == EQ_MARKER["32N"]).all() and np.isfinite(scales).all()
+    # Rows 1440 + i of 32S are rows 933856 + i of 32N.
+    want = np.arange(933_856, 933_856 + len(north)) % 100
+    np.testing.assert_array_equal(north[..., 1], np.broadcast_to(want[:, None], north.shape[:2]))
 
 
 # ---- G3: pixel-centre transforms --------------------------------------------------------------

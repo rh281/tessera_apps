@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import geotessera
 import numpy as np
 import pandas as pd
 import pytest
@@ -1333,6 +1334,7 @@ def test_provenance_record_with_caldor_reader(caldor_reader, tmp_path, monkeypat
     assert libs["gdal"] == rasterio.__gdal_version__
     for name in ("icechunk", "zarr", "geotessera"):
         assert name in libs
+    assert libs["geotessera"] == geotessera.__version__ and libs["geotessera"] is not None
     assert rec["store"] == {"backend": "KeyLog"}
     assert rec["model"] == {"checkpoint_id": "tessera_v1_1_aws_encoder.pt", "geoemb:dimensions": 128}
     assert rec["pipeline_commits"] == {"10N": {"2020": "abc2020", "2022": "abc2022"}}

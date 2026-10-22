@@ -12,6 +12,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import geopandas as gpd
+import geotessera
 import numpy as np
 import pandas as pd
 import pytest
@@ -261,6 +262,8 @@ def test_finish_run_writes_the_report_last_and_reruns_skip(boundary_reader, two_
     assert ctx is not None
     _write_outputs(ctx, extra)
     ctx.warn("something to note")
+    # One chunk read inside the run: bytes_read counts chunk payload only, so a run that reads none reports 0.
+    boundary_reader.read_window("10N", 2020, slice(0, 32), slice(0, 32))
     report = finish_run(ctx, summary={"burned": 1}, extra={"extra": extra}, validation_written=False)
 
     on_disk = json.loads(ctx.paths.report.read_text())
@@ -270,7 +273,7 @@ def test_finish_run_writes_the_report_last_and_reruns_skip(boundary_reader, two_
     assert report["warnings"] == ["something to note"]
     assert report["provenance"]["aoi"]["sha256"] == ctx.aoi.sha256
     assert report["provenance"]["store"]["backend"] == "KeyLog"
-    assert isinstance(report["bytes_read"], int) and report["bytes_read"] > 0
+    assert isinstance(report["bytes_read"], int) and report["bytes_read"] == boundary_reader.bytes_read > 0
     assert "chunk payload" in report["bytes_read_note"].lower()
     assert report["timings"]["wall_s"] > 0
     for name in ("tif", "summary_parquet", "summary_csv", "preview"):
@@ -571,6 +574,19 @@ def test_a_code_change_reruns(boundary_reader, two_zone_aoi, tmp_path, monkeypat
     assert _prepare(boundary_reader, two_zone_aoi, out, {}) is not None
 
 
+def test_a_geotessera_upgrade_reruns(boundary_reader, two_zone_aoi, tmp_path, monkeypatch):
+    # geotessera's merged view decides which group serves each row, and the pin admits 0.11.x
+    # releases, so outputs made through another geotessera are not current.
+    out = tmp_path / "out"
+    ctx = _prepare(boundary_reader, two_zone_aoi, out, {})
+    assert ctx.params["code"]["geotessera_version"] == geotessera.__version__
+    _write_outputs(ctx)
+    finish_run(ctx, summary={}, extra={}, validation_written=False)
+    assert _prepare(boundary_reader, two_zone_aoi, out, {}) is None
+    monkeypatch.setattr(geotessera, "__version__", "0.11.99")
+    assert _prepare(boundary_reader, two_zone_aoi, out, {}) is not None
+
+
 def test_code_record_hashes_the_module_sources(tmp_path):
     source = tmp_path / "fake_app_module.py"
     source.write_text("THRESHOLD = 1\n")
@@ -578,7 +594,7 @@ def test_code_record_hashes_the_module_sources(tmp_path):
     module = importlib.util.module_from_spec(spec)
     first = code_record([module])
     assert first == code_record([module]) and first != code_record()
-    assert set(first) == {"tessera_apps_version", "sources_sha256"}
+    assert set(first) == {"tessera_apps_version", "geotessera_version", "sources_sha256"}
     source.write_text("THRESHOLD = 2\n")
     assert code_record([module])["sources_sha256"] != first["sources_sha256"]
 

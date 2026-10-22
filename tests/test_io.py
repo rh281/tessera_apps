@@ -19,7 +19,6 @@ from tessera_apps.io import (
     TesseraReader,
     YearsNotPublishedError,
     ZoneGrid,
-    _decode_years,
     canonicalize_zone,
     iter_blocks,
     iter_plan_blocks,
@@ -188,7 +187,8 @@ def test_years_outside_store_range_are_refused(caldor_reader, year):
 
 def test_time_axis_decoding(caldor_reader):
     assert [caldor_reader.year_index("10N", y) for y in (2017, 2020, 2025)] == [0, 3, 8]
-    assert _decode_years(caldor_reader._group("10N"), 9) == list(range(2017, 2026))
+    # geotessera decodes the time coordinate (IcechunkStore.years); the reader checks it runs from 2017.
+    assert caldor_reader.store_years() == list(range(2017, 2026))
 
 
 def test_bad_window_and_layer(caldor_reader):

@@ -179,7 +179,9 @@ VALIDATION_SKIPPED = "Validation skipped, the reference could not be loaded"
 MEMORY_FIXED = 800_000_000
 MEMORY_STREAM_PER_PIXEL = 20
 MEMORY_WRITE_PER_PIXEL = 60
-MEMORY_PER_BLOCK_PIXEL_YEAR = 210
+#: Each block-pixel-year term rose from 210 to 360 bytes when reads moved to geotessera (0.2.0): the
+#: Rondonia and Everglades demos peaked at 1.92 GB against estimates of 1.51 and 1.58 GB at 210.
+MEMORY_PER_BLOCK_PIXEL_YEAR = 360
 MEMORY_RING_PER_PIXEL = 12
 MEMORY_MARGIN = 1.4
 

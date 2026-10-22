@@ -150,11 +150,12 @@ print(reader.bytes_read, reader.provenance())
 
 What `io.py` takes care of:
 
+- **geotessera.** Every embedding read goes through [`geotessera`](https://github.com/ucam-eo/geotessera) 0.11, the University of Cambridge client. `TesseraReader.open` opens `GeoTesseraZarr(store_url="s3://tessera-embeddings/v1.1/dclimate.icechunk")` and refuses to read unless geotessera names the store `1.1-dclimate`; the chunks are read through geotessera's `IcechunkStore` at the snapshot you pin, or at the current head, which the report records. The module docstring of `tessera_apps.io` explains why the reads use `IcechunkStore` rather than `GeoTesseraZarr` itself (it cannot pin a snapshot yet) and where the observation counts come from.
 - **Zones.** Pure six-degree UTM bands, `10N` or `20S`, with no MGRS exceptions. An AOI that crosses a zone edge is split, and each pixel is taken from its nominal zone, so nothing is counted twice.
 - **Grid.** Rows run north to south. The grid comes from each group's `spatial:transform`, and a transform with ascending northing is refused.
 - **No data.** A NaN `scales` value or an all-zero vector is never valid.
 - **Years.** Every year is checked against the zone's `years_complete` before any chunk is read.
-- **Cost.** Large AOIs are streamed in chunk-aligned blocks. Point reads are batched so each chunk is fetched once. `bytes_read` counts the payload bytes every read returns.
+- **Cost.** Large AOIs are streamed in chunk-aligned blocks. Point reads are batched so each chunk is fetched once. `bytes_read` counts the chunk payload bytes every read returns (not the `zarr.json` metadata, which Icechunk serves from the snapshot it already holds).
 - **Radar.** `Window.radar_free` marks pixels embedded without Sentinel-1. Comparing a radar year with a radar-free year biases cosine distance (see the survey, B5).
 - **Cache.** `ChunkCache` is an optional on-disk chunk cache, namespaced by Icechunk snapshot.
 

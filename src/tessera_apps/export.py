@@ -1032,14 +1032,18 @@ def outputs_current(paths: OutputPaths, digest: str, *, need_validation: bool) -
 def library_versions() -> dict[str, str | None]:
     """Installed versions of the libraries that shape results, None when not installed.
 
-    Versions come from package metadata, so nothing is imported (geotessera stays unimported).
+    Versions come from package metadata, except geotessera's, which is ``geotessera.__version__``:
+    every embedding read goes through geotessera (a hard dependency), so its entry is never None.
     """
+    import geotessera
+
     out: dict[str, str | None] = {}
     for name in PROVENANCE_LIBRARIES:
         try:
             out[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             out[name] = None
+    out["geotessera"] = str(geotessera.__version__)
     out["gdal"] = rasterio.__gdal_version__
     return out
 
@@ -1055,9 +1059,10 @@ def provenance_record(
 ) -> dict[str, Any]:
     """The reproducibility block for a report (brief section 6 as corrected by survey S4).
 
-    Records the package, Python and library versions; the store identity from
-    ``reader.provenance()`` (backend, store URL, snapshot id: the data version) apart from the model
-    keys, which go under ``"model"`` (``checkpoint_id`` names the model weights); the pipeline commit
+    Records the package, Python and library versions (geotessera's included); the store identity
+    from ``reader.provenance()`` (for the published store geotessera's ``url``, ``dataset``,
+    ``model_version`` and ``build_version``, and the snapshot id: the data version) apart from the
+    root model keys, which go under ``"model"`` (``checkpoint_id`` names the model weights); the pipeline commit
     of every zone-year when the reader has ``run_commits``; the years, zones, params and seed; the
     AOI file's name and sha256; :func:`run_args_digest`; and a UTC timestamp. Nothing is read from
     the environment, and reader provenance keys that look like credentials are dropped.

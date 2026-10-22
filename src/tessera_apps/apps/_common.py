@@ -57,8 +57,10 @@ logger = logging.getLogger(__name__)
 
 #: What ``bytes_read`` in a report counts.
 BYTES_READ_NOTE = (
-    "Chunk payload bytes returned by the zarr store (io.CountingStore), gap bytes of merged range "
-    "requests included. Icechunk manifest and snapshot fetches below the zarr interface are not counted."
+    "Chunk payload bytes returned by the zarr store that geotessera's IcechunkStore reads through "
+    "(io.CountingStore), shard indexes and the gap bytes of merged range requests included. zarr.json "
+    "metadata, which Icechunk serves from the snapshot it holds, and Icechunk's own manifest and snapshot "
+    "fetches below the zarr interface are not counted."
 )
 
 #: Modules whose source shapes every app's outputs; their hash is part of every arguments digest.
@@ -384,15 +386,19 @@ def code_record(modules: Iterable[ModuleType | str] = ()) -> dict[str, str]:
     An upgrade, or an edit between releases (the version stays the same until the next one), that
     changes the shared logic must not let a rerun keep outputs made by the old code. So the record
     holds the package version and the sha256 of the source of :data:`FRAMEWORK_MODULES` plus the
-    app's own modules.
+    app's own modules. It also holds the geotessera version: every embedding is read through
+    geotessera's merged zone view, which decides which hemisphere group serves each row and how an
+    incomplete year reads, and the pin (``>=0.11,<0.12``) admits patch releases.
 
     Args:
         modules: The app's modules (module objects or dotted names).
 
     Returns:
-        ``{"tessera_apps_version", "sources_sha256"}``.
+        ``{"tessera_apps_version", "geotessera_version", "sources_sha256"}``.
     """
     import importlib
+
+    import geotessera
 
     given: dict[str, ModuleType | None] = dict.fromkeys(FRAMEWORK_MODULES)
     for m in modules:
@@ -410,7 +416,11 @@ def code_record(modules: Iterable[ModuleType | str] = ()) -> dict[str, str]:
         except OSError:
             digest.update(b"unreadable")
         digest.update(b"\0")
-    return {"tessera_apps_version": __version__, "sources_sha256": digest.hexdigest()}
+    return {
+        "tessera_apps_version": __version__,
+        "geotessera_version": str(geotessera.__version__),
+        "sources_sha256": digest.hexdigest(),
+    }
 
 
 def available_memory() -> int | None:

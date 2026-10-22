@@ -190,7 +190,9 @@ MEMORY_FIXED = 800_000_000
 MEMORY_STREAM_PER_PIXEL = 16
 MEMORY_WRITE_PER_PIXEL = 56
 MEMORY_COAST_PER_PIXEL = 26
-MEMORY_PER_BLOCK_PIXEL_YEAR = 210
+#: Each block-pixel-year term rose from 210 to 360 bytes when reads moved to geotessera (0.2.0): the
+#: Rondonia and Everglades demos peaked at 1.92 GB against estimates of 1.51 and 1.58 GB at 210.
+MEMORY_PER_BLOCK_PIXEL_YEAR = 360
 MEMORY_MARGIN = 1.4
 
 SCOPE_CAVEAT = (

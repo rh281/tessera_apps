@@ -1,5 +1,11 @@
 affine==3.0.1
     # via rasterio
+aiohappyeyeballs==2.7.1
+    # via aiohttp
+aiohttp==3.14.5
+    # via geotessera
+aiosignal==1.4.0
+    # via aiohttp
 annotated-doc==0.0.5
     # via typer
 annotated-types==0.8.0
@@ -11,28 +17,42 @@ asttokens==3.0.2
 attrs==26.1.0
     # via
     #   affine
+    #   aiohttp
     #   jsonschema
     #   morecantile
     #   rasterio
     #   referencing
+branca==0.8.2
+    # via folium
 certifi==2026.7.22
     # via
     #   pyogrio
     #   pyproj
     #   rasterio
+    #   requests
+charset-normalizer==3.5.2
+    # via requests
 click==8.5.0
     # via
+    #   dask
+    #   mercantile
     #   morecantile
     #   rasterio
     #   rio-cogeo
 cloudpickle==3.1.2
-    # via joblib
+    # via
+    #   dask
+    #   joblib
 comm==0.2.3
     # via ipykernel
+contextily==1.7.1
+    # via geotessera
 contourpy==1.4.0
     # via matplotlib
 cycler==0.12.1
     # via matplotlib
+dask==2026.8.0
+    # via geotessera
 debugpy==1.8.22
     # via ipykernel
 donfig==0.8.1.post1
@@ -41,14 +61,42 @@ executing==2.3.0
     # via stack-data
 fastjsonschema==2.22.2
     # via nbformat
+folium==0.20.0
+    # via geotessera
 fonttools==4.67.0
     # via matplotlib
+frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
+fsspec==2026.9.0
+    # via
+    #   dask
+    #   geotessera
+geodatasets==2026.5.1
+    # via geotessera
+geographiclib==2.1
+    # via geopy
 geopandas==1.2.0
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
+geopy==2.5.0
+    # via contextily
+geotessera==0.11.0
     # via tessera-apps (pyproject.toml)
 google-crc32c==1.9.0
     # via zarr
 icechunk==2.3.0
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
+idna==3.20
+    # via
+    #   requests
+    #   yarl
+imageio==2.38.1
+    # via scikit-image
 iniconfig==2.3.1
     # via pytest
 ipykernel==7.4.0
@@ -59,8 +107,14 @@ ipython-pygments-lexers==1.1.1
     # via ipython
 jedi==0.20.1
     # via ipython
+jinja2==3.1.6
+    # via
+    #   branca
+    #   folium
 joblib==1.6.0
-    # via scikit-learn
+    # via
+    #   contextily
+    #   scikit-learn
 jsonschema==4.26.0
     # via nbformat
 jsonschema-specifications==2025.9.1
@@ -77,22 +131,37 @@ jupyter-core==5.9.1
     #   nbformat
 kiwisolver==1.5.1
     # via matplotlib
+lazy-loader==0.6
+    # via scikit-image
 librt==0.16.0
     # via mypy
+locket==1.0.0
+    # via partd
 markdown-it-py==4.2.0
     # via rich
+markupsafe==3.0.4
+    # via jinja2
 matplotlib==3.11.2
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   contextily
+    #   geotessera
 matplotlib-inline==0.2.2
     # via
     #   ipykernel
     #   ipython
 mdurl==0.1.2
     # via markdown-it-py
+mercantile==1.2.1
+    # via contextily
 morecantile==7.1.0
     # via rio-cogeo
 msgspec==0.22.0
     # via zarr
+multidict==7.1.0
+    # via
+    #   aiohttp
+    #   yarl
 mypy==2.4.0
     # via tessera-apps (pyproject.toml)
 mypy-extensions==1.1.0
@@ -107,42 +176,61 @@ nbformat==5.11.1
     #   nbclient
 nest-asyncio2==1.7.4
     # via ipykernel
+networkx==3.7
+    # via scikit-image
 numcodecs==0.17.0
     # via
     #   tessera-apps (pyproject.toml)
+    #   geotessera
     #   zarr
 numpy==2.5.4
     # via
     #   tessera-apps (pyproject.toml)
     #   contourpy
+    #   folium
     #   geopandas
+    #   geotessera
+    #   imageio
     #   matplotlib
     #   numcodecs
     #   pandas
     #   pcodec
     #   pyogrio
     #   rasterio
+    #   rioxarray
+    #   scikit-image
     #   scikit-learn
     #   scipy
     #   shapely
+    #   tifffile
     #   xarray
     #   zarr
+obstore==0.12.0
+    # via geotessera
 packaging==26.3
     # via
+    #   dask
     #   geopandas
     #   ipykernel
+    #   lazy-loader
     #   matplotlib
+    #   pooch
     #   pyogrio
     #   pytest
+    #   rioxarray
+    #   scikit-image
     #   xarray
     #   zarr
 pandas==3.0.6
     # via
     #   tessera-apps (pyproject.toml)
     #   geopandas
+    #   geotessera
     #   xarray
 parso==0.8.7
     # via jedi
+partd==1.4.2
+    # via dask
 pathspec==1.1.1
     # via mypy
 pcodec==1.0.4
@@ -150,13 +238,27 @@ pcodec==1.0.4
 pexpect==4.9.0
     # via ipython
 pillow==12.3.0
-    # via matplotlib
+    # via
+    #   contextily
+    #   imageio
+    #   matplotlib
+    #   scikit-image
 platformdirs==4.13.0
-    # via jupyter-core
+    # via
+    #   jupyter-core
+    #   pooch
 pluggy==1.6.0
     # via pytest
+pooch==1.9.0
+    # via
+    #   geodatasets
+    #   geotessera
 prompt-toolkit==3.0.53
     # via ipython
+propcache==0.5.4
+    # via
+    #   aiohttp
+    #   yarl
 psutil==7.2.2
     # via ipython
 ptyprocess==0.7.0
@@ -164,7 +266,9 @@ ptyprocess==0.7.0
 pure-eval==0.2.4
     # via stack-data
 pyarrow==26.0.0
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
 pydantic==2.14.1
     # via
     #   morecantile
@@ -190,6 +294,7 @@ pyproj==3.8.0
     #   tessera-apps (pyproject.toml)
     #   geopandas
     #   morecantile
+    #   rioxarray
 pytest==9.1.1
     # via tessera-apps (pyproject.toml)
 python-dateutil==2.9.0.post0
@@ -198,7 +303,9 @@ python-dateutil==2.9.0.post0
     #   matplotlib
     #   pandas
 pyyaml==6.0.3
-    # via donfig
+    # via
+    #   dask
+    #   donfig
 pyzmq==27.2.0
     # via
     #   ipykernel
@@ -206,28 +313,44 @@ pyzmq==27.2.0
 rasterio==1.5.2
     # via
     #   tessera-apps (pyproject.toml)
+    #   contextily
+    #   geotessera
     #   rio-cogeo
+    #   rioxarray
 referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+requests==2.34.2
+    # via
+    #   contextily
+    #   folium
+    #   pooch
 rich==15.0.0
     # via
     #   tessera-apps (pyproject.toml)
+    #   geotessera
     #   typer
 rio-cogeo==7.0.4
     # via tessera-apps (pyproject.toml)
+rioxarray==0.23.0
+    # via geotessera
 rpds-py==2026.9.1
     # via
     #   jsonschema
     #   referencing
 ruff==0.17.0
     # via tessera-apps (pyproject.toml)
+scikit-image==0.26.0
+    # via geotessera
 scikit-learn==1.9.1
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
 scipy==1.18.1
     # via
     #   tessera-apps (pyproject.toml)
+    #   scikit-image
     #   scikit-learn
 shapely==2.2.0
     # via
@@ -241,6 +364,12 @@ stack-data==0.6.3
     # via ipython
 threadpoolctl==3.7.0
     # via scikit-learn
+tifffile==2026.10.15
+    # via scikit-image
+toolz==1.2.0
+    # via
+    #   dask
+    #   partd
 tornado==6.5.10
     # via
     #   ipykernel
@@ -255,24 +384,46 @@ traitlets==5.16.1
     #   nbclient
     #   nbformat
 typer==0.27.3
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
 typing-extensions==4.16.0
     # via
+    #   aiohttp
+    #   aiosignal
     #   jupyter-client
     #   mypy
     #   numcodecs
+    #   obstore
     #   pydantic
     #   pydantic-core
     #   referencing
     #   typing-inspection
     #   zarr
+    #   zarr-cm
 typing-inspection==0.4.4
     # via pydantic
+urllib3==2.8.0
+    # via
+    #   geotessera
+    #   requests
 wcwidth==0.9.2
     # via prompt-toolkit
 xarray==2026.9.0
-    # via tessera-apps (pyproject.toml)
+    # via
+    #   tessera-apps (pyproject.toml)
+    #   geotessera
+    #   rioxarray
+xyzservices==2026.9.1
+    # via
+    #   contextily
+    #   folium
+yarl==1.25.1
+    # via aiohttp
 zarr==3.4.1
     # via
     #   tessera-apps (pyproject.toml)
+    #   geotessera
     #   icechunk
+zarr-cm==0.5.0
+    # via geotessera

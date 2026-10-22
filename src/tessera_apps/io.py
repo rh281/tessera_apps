@@ -1,40 +1,117 @@
-"""Read the TESSERA v1.1 global embeddings from the published Icechunk store.
+"""Read the TESSERA v1.1 global embeddings through the ``geotessera`` library.
 
-The store holds one Zarr group per UTM zone and hemisphere (``10N``, ``20S``). Each group carries
-int8 ``embeddings`` (time, northing, easting, band), float32 ``scales`` (true value is
-``embeddings * scales``, NaN means no data), and three uint16 observation counts. Rows run north to
-south, the time axis is calendar years 2017 to 2025, and a zone lists the years it has published in
+The published store is the dClimate Icechunk repository at :data:`STORE_URL`. It holds one Zarr
+group per UTM zone and hemisphere (``10N``, ``20S``). Each group carries int8 ``embeddings``
+(time, northing, easting, band), float32 ``scales`` (true value is ``embeddings * scales``, NaN
+means no data), and three uint16 observation counts. Rows run north to south, the time axis is
+calendar years 2017 to 2025, and a zone lists the years it has published in
 ``attrs["years_complete"]``. ``docs/prebuild-survey.md`` records how each of these facts was checked.
 
-Everything here reads through :class:`TesseraReader`, which opens one group at a time with plain
-zarr (never Dask) and counts the bytes it pulls from the store. AOI reads are planned first
-(:func:`plan_aoi`), which touches metadata only, so callers can check years, zone count and size
-before any chunk read. A plan is then read whole (:func:`read_plan`) when small, or block by block
-(:func:`iter_plan_blocks`) when large. Layers, years and point chunks are fetched concurrently on a
-small thread pool, since each zarr call is a few serial round trips (shard index, then data).
+Every embedding read goes through ``geotessera`` (pinned ``>=0.11,<0.12``), as follows.
+
+- **Identity through** ``GeoTesseraZarr``. :meth:`TesseraReader.open` constructs
+  ``geotessera.GeoTesseraZarr(store_url=STORE_URL)`` with the explicit URL, never the library
+  default, and before any chunk read requires ``gt.dataset.name == "1.1-dclimate"``; anything else
+  raises :class:`DatasetMismatchError`, which the CLI turns into exit code 2. The reader's
+  :meth:`~TesseraReader.provenance`, and so every report's ``store`` block, records ``gt.url``, the
+  dataset name, ``gt.model_version``, ``gt.build_version`` and the snapshot id actually read.
+  geotessera reads the two versions at the head of main, so the reader checks them against the
+  snapshot it reads: another model is refused, and another build is recorded as the snapshot's
+  (geotessera's value kept as ``head_build_version``).
+- **Reads through geotessera's** ``IcechunkStore``, **pinned and counted**. ``GeoTesseraZarr`` in
+  0.11 opens the branch head with a session of its own: it takes no snapshot or branch, and given a
+  zarr ``Store`` it takes the plain Zarr path, not Icechunk. So it can neither pin a snapshot nor
+  have its bytes counted (the upstream issue asks for both). The reader therefore constructs the
+  class ``GeoTesseraZarr`` uses inside, the public :class:`geotessera.icechunk.IcechunkStore`, at the
+  snapshot asked for (``--snapshot``) or at the branch head as it stands when the reader opens (a
+  read-only session never moves, so a run reads one snapshot throughout and records it). Its public
+  ``root`` is replaced, before the first read, by the same group opened through
+  :class:`CountingStore` (:class:`CountedIcechunkStore`), and every chunk read goes through its
+  ``zone_arrays(zone)``: the arrays behind ``open_zone(zone)``, which is what
+  ``GeoTesseraZarr.open_zone`` returns for an Icechunk store. The private ``gt._icechunk`` is never
+  touched. No retry layer is added and no ``progress=`` is passed (survey, skill rules).
+- **The merged grid.** geotessera presents each zone as one grid in the northern CRS, both
+  hemisphere groups merged with southern northings negative, embeddings ordered
+  ``(time, band, y, x)``. The apps keep this package's per-hemisphere grids (:class:`ZoneGrid`, the
+  nominal-zone masks, the chunk-aligned blocks), so a window of a zone group maps onto the merged
+  grid by a whole-pixel offset worked out from the two grids' ``spatial:transform`` attributes:
+  ``merged_row = group_row + (top_merged - top_group) / 10``, ``top_group`` taken in the northern
+  CRS (less the 10,000,000 m false northing for a south group), and likewise for columns from the
+  west edges. Rows centred north of the equator come from the north group and the rest from the
+  south group. Each south group reaches 14.72 km north of the equator, so a south-zone window that
+  extends above the equator holds the north group's pixels there, or no data in a zone with no
+  north group (whose merged grid starts at the equator); those rows lie outside the zone's nominal
+  band, so plan masks and point reads never use them. Point reads start their chunk window at the
+  south group's first own row, so they never fetch the north group's chunk for them; a cached read
+  whose chunk-aligned cover reaches above that row does (live, a south group's chunk row 5 takes
+  the north group's bottom chunk row with it, about twice the bytes of that chunk row). Snapshots
+  before ``B6AFRJGX5XQC0A716PA0`` register ``spatial:transform`` at the pixel centre, which puts a
+  north group's bottom row on the equator where geotessera serves it from neither group; a read of
+  that row is refused rather than returned as no data.
+- **Embeddings in strips.** geotessera fills its own ``(band, y, x)`` output for every read (with
+  an ``np.ix_`` assignment of the transposed zarr block, most of the extra CPU), and the apps want
+  ``(rows, cols, band)``, C-contiguous, as zarr returned it before. So the reader asks for whole
+  chunk rows of at most 64 MiB at a time (one chunk row of a 2048-column block) and transposes
+  each strip into one preallocated output: the transient is a strip, not the window. At most four
+  embeddings reads run at once. Measured on one 512 x 2048 block of every layer against the 0.1.0
+  reader, peak memory is the same for 1 year (within 5 percent) and lower for 2, 4 and 9 years (by
+  5 to 20 percent at 2 and 4, by 20 to 45 percent at 9, where the limit applies). The CPU is about
+  twice (1.7 to 3.6 times), and the wall time is longer where the network does not hide it, most
+  for a 1-year block (live, about 4.4 s against 2 s); the 0.2.0 checkpoint A report has the figures.
+- **Observation counts.** geotessera exposes ``s2_obs_count``, ``s1_asc_obs_count`` and
+  ``s1_desc_obs_count`` only on the zone dataset (``open_zone`` and ``zone_arrays``), not through
+  ``read_region`` or ``sample_points``. They are the one family of layers this package reads that
+  the library does not wrap in a read call, and the package reads them from that zone dataset, on
+  the same store object as the embeddings, because every app's radar-regime check needs them.
+- **int8 throughout.** Blocks stay int8 with their scales, and the cosine paths work on them;
+  nothing here dequantises (:meth:`Window.dequantize` does, for the means that need it).
+  ``read_region_quantized`` would return the same int8, but only for one lon/lat box in the zone
+  of its centre, with no observation counts and no chunk alignment.
+- **Published years.** ``years_complete`` comes from ``IcechunkStore.incomplete_years()``, read
+  once per reader: the store's years less each group's incomplete ones. It reads only attributes
+  (about 0.1 s for all 120 groups live), where ``open_zone``'s ``geotessera:years_incomplete``
+  costs 0.7 to 1.4 s per zone and reads the time coordinate's chunks. geotessera reads a group with
+  no ``years_complete`` attribute as complete; this reader refuses it.
+
+AOI reads are planned first (:func:`plan_aoi`), which touches metadata only, so callers can check
+years, zone count and size before any chunk read. A plan is then read whole (:func:`read_plan`)
+when small, or block by block (:func:`iter_plan_blocks`) when large. Layers, years and point chunks
+are fetched concurrently on a small thread pool, since each zarr call is a few serial round trips
+(shard index, then data). :attr:`TesseraReader.bytes_read` counts chunk payload bytes (see
+:class:`CountingStore`).
 """
 
 from __future__ import annotations
 
+import asyncio
+import atexit
 import dataclasses
+import hashlib
+import itertools
 import logging
 import math
 import os
 import re
+import shutil
+import tempfile
 import threading
-from collections.abc import AsyncIterator, Iterable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
 import numpy as np
 import shapely
 import zarr
+from geotessera.icechunk import FALSE_NORTHING, IcechunkStore
 from pyproj import CRS, Geod, Transformer
 from rasterio.features import rasterize
 from rasterio.transform import Affine
 from shapely.geometry import Polygon, box
 from shapely.geometry.base import BaseGeometry
 from zarr.abc.store import Store
+from zarr.core.buffer import default_buffer_prototype
+from zarr.core.sync import sync
 from zarr.storage import WrapperStore
 
 from tessera_apps.cache import ChunkCache, ChunkKey
@@ -49,6 +126,8 @@ STORE_BUCKET = "tessera-embeddings"
 STORE_PREFIX = "v1.1/dclimate.icechunk"
 STORE_REGION = "us-west-2"
 STORE_URL = f"s3://{STORE_BUCKET}/{STORE_PREFIX}"
+#: The geotessera dataset the store must be (``gt.dataset.name``): the dClimate v1.1 run.
+DATASET_NAME = "1.1-dclimate"
 
 FIRST_YEAR = 2017
 LAST_YEAR = 2025
@@ -89,6 +168,20 @@ _POOL = ThreadPoolExecutor(max_workers=_READ_THREADS, thread_name_prefix="tesser
 #: waits, and a pool whose workers all wait on their own queue deadlocks.
 _GROUP_POOL = ThreadPoolExecutor(max_workers=max(1, _READ_THREADS // 2), thread_name_prefix="tessera-group")
 _LOCAL = threading.local()
+#: Embeddings reads through geotessera in flight at once, across every reader. Each read holds its
+#: output and, one strip at a time, geotessera's (band, y, x) array and the zarr block it fills it
+#: from. The strips alone keep a 512 x 2048 block of 1 to 9 years within 5 percent of the 0.1.0
+#: reader's peak memory or below it; the limit takes effect from 5 years in flight and lowers a
+#: 9-year block's peak by about a third more (the 0.2.0 checkpoint A report has the measurements).
+#: The other layers are 30 times smaller and are not gated.
+_EMBEDDING_READS = threading.BoundedSemaphore(max(1, int(os.environ.get("TESSERA_APPS_EMBEDDING_READS", "4"))))
+#: Most embeddings bytes one strip of a read asks geotessera for (whole chunk rows, at least one).
+#: One live chunk row of a 2048-column block is exactly this, so a 512 x 2048 block reads in two
+#: strips, while a point read's chunk (8 MiB) and the tests' small windows read in one. A strip costs
+#: one more shard index fetch and round trip, and in a store whose inner chunks are smaller than
+#: zarr's 1 MiB coalescing gap it can also fetch the chunks between the ones it needs; the live
+#: embeddings chunks are about 8 MB, so it never does there.
+_STRIP_BYTES = 64 << 20
 #: Chunk groups fetched together by :func:`read_points`; bounds memory at about 8.7 MB per group.
 _POINT_BATCH = 32
 
@@ -121,6 +214,24 @@ class ReadTooLargeError(TesseraError):
 
 class StoreUnavailableError(TesseraError):
     """The store cannot be opened: it cannot be reached, or the snapshot asked for is not in it."""
+
+
+class DatasetMismatchError(TesseraError):
+    """geotessera does not identify the store as the dClimate v1.1 dataset this package reads.
+
+    Attributes:
+        found: The dataset geotessera named, or ``"none"`` when it named none.
+    """
+
+    def __init__(self, found: str | None, message: str | None = None) -> None:
+        self.found = found if found else "none"
+        if message is None:
+            message = f"geotessera identifies {STORE_URL} as dataset {self.found}, not {DATASET_NAME}."
+        super().__init__(
+            f"{message} This package reads only the dClimate v1.1 run: embeddings from different datasets live in "
+            "unrelated spaces and cannot be compared. Check that geotessera is version 0.11 (tessera_apps pins "
+            ">=0.11,<0.12)."
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -412,9 +523,18 @@ class Window:
 # --------------------------------------------------------------------------------------------
 
 
+#: Last path segments of zarr metadata documents, which :class:`CountingStore` does not count.
+METADATA_KEYS = frozenset({"zarr.json", ".zarray", ".zgroup", ".zattrs", ".zmetadata"})
+
+
+def is_metadata_key(key: str) -> bool:
+    """Whether a store key names a zarr metadata document rather than chunk data."""
+    return key.rsplit("/", 1)[-1] in METADATA_KEYS
+
+
 @dataclasses.dataclass
 class ByteCounter:
-    """Running total of payload bytes returned by the store."""
+    """Running total of chunk payload bytes returned by the store."""
 
     bytes: int = 0
     requests: int = 0
@@ -431,15 +551,21 @@ class ByteCounter:
 
 
 class CountingStore(WrapperStore[Any]):
-    """A zarr store wrapper that counts the bytes every read returns.
+    """A zarr store wrapper that counts the chunk bytes every read returns.
 
     zarr reads through ``get`` and ``get_partial_values`` on the async path and ``get_sync`` on the
     sync path; all three are counted. The coalescing range readers (``get_ranges`` and
     ``get_ranges_sync``, which zarr 3.4 sharding uses for partial-shard reads) run zarr's own
     coalescer above this wrapper, so each merged fetch, gaps included, passes through the counted
-    ``get`` or ``get_sync``. Copies made by ``with_read_only`` share the same counter. Icechunk's
-    manifest and snapshot fetches happen below the zarr store interface and are not counted; they
-    are small next to chunk payloads.
+    ``get`` or ``get_sync``. Shard indexes are chunk-key reads and are counted. Copies made by
+    ``with_read_only`` share the same counter.
+
+    Metadata documents (``zarr.json``) are not counted. Icechunk serves them from the snapshot its
+    session already holds, so they cost no store traffic, and geotessera opens an array afresh on
+    every read, so counting them would add the same in-memory document again on each read (about
+    1 KB per array, and 35 KB per zone group, whose attributes carry the run provenance). Icechunk's
+    own manifest and snapshot fetches happen below the zarr store interface and are not counted
+    either; they are small next to chunk payloads.
     """
 
     def __init__(self, store: Any, counter: ByteCounter | None = None) -> None:  # noqa: ANN401
@@ -449,19 +575,24 @@ class CountingStore(WrapperStore[Any]):
     def _with_store(self, store: Any) -> Self:  # noqa: ANN401
         return type(self)(store, self.counter)
 
+    def _count(self, key: str, buf: Buffer | None) -> None:
+        if not is_metadata_key(key):
+            self.counter.add(buf)
+
     async def get(self, key: str, prototype: BufferPrototype, byte_range: ByteRequest | None = None) -> Buffer | None:
         """Read one key and count it."""
         buf = await self._store.get(key, prototype, byte_range)
-        self.counter.add(buf)
+        self._count(key, buf)
         return buf
 
     async def get_partial_values(
         self, prototype: BufferPrototype, key_ranges: Iterable[tuple[str, ByteRequest | None]]
     ) -> list[Buffer | None]:
         """Read several ranges and count them."""
+        key_ranges = list(key_ranges)
         bufs = await self._store.get_partial_values(prototype, key_ranges)
-        for buf in bufs:
-            self.counter.add(buf)
+        for (key, _), buf in zip(key_ranges, bufs, strict=True):
+            self._count(key, buf)
         return list(bufs)
 
     def get_sync(
@@ -469,7 +600,7 @@ class CountingStore(WrapperStore[Any]):
     ) -> Buffer | None:
         """Synchronous read of one key, counted."""
         buf = self._store.get_sync(key, prototype=prototype, byte_range=byte_range)
-        self.counter.add(buf)
+        self._count(key, buf)
         return buf
 
     # The two range readers coalesce here, over the counted get / get_sync, instead of forwarding to
@@ -533,15 +664,226 @@ def _icechunk_message(exc: BaseException) -> str:
     return text or type(exc).__name__
 
 
-def _find_counter(store: Any) -> ByteCounter | None:  # noqa: ANN401
-    """The counter of the first CountingStore in a chain of wrapper stores."""
-    seen = 0
-    while store is not None and seen < 16:
-        if isinstance(store, CountingStore):
-            return store.counter
-        store = getattr(store, "_store", None)
-        seen += 1
-    return None
+# --------------------------------------------------------------------------------------------
+# The store, through geotessera
+# --------------------------------------------------------------------------------------------
+
+
+class CountedIcechunkStore(IcechunkStore):
+    """geotessera's :class:`~geotessera.icechunk.IcechunkStore` with every read it makes counted.
+
+    The constructor is geotessera's own: it opens a read-only session at ``snapshot_id``, or at the
+    head of ``branch``, and lists the zone groups. Then the public ``root`` is replaced by the same
+    group opened through a :class:`CountingStore`. geotessera reads every zone group, attribute and
+    array through ``root`` and builds a zone's merged view on the zone's first ``open_zone`` or
+    ``zone_arrays``, so every chunk read after construction is counted. The few reads geotessera
+    makes inside its constructor (the root group, the group list and the first group's time
+    coordinate) come before the swap and are not.
+
+    Args:
+        location: ``s3://`` URL or local path of an Icechunk repository.
+        branch: Branch to read when no snapshot is given.
+        snapshot_id: Snapshot to read.
+        counter: Counter to add to; a new one by default.
+        wrap: Applied to the session store inside the counter, so a wrapper (the tests' key log)
+            sees every read the counter sees.
+    """
+
+    def __init__(
+        self,
+        location: str | os.PathLike[str],
+        *,
+        branch: str = "main",
+        snapshot_id: str | None = None,
+        counter: ByteCounter | None = None,
+        wrap: Callable[[Store], Store] | None = None,
+    ) -> None:
+        super().__init__(location, branch=branch, snapshot_id=snapshot_id)
+        self.counter = counter if counter is not None else ByteCounter()
+        inner = self.session.store if wrap is None else wrap(self.session.store)
+        self.counting = CountingStore(inner, self.counter)
+        self.root = zarr.open_group(self.counting, mode="r", use_consolidated=False)
+
+    @property
+    def snapshot_id(self) -> str:
+        """The snapshot this store reads, whether it was asked for or resolved from the branch."""
+        return str(self.session.snapshot_id)
+
+
+def check_dataset(gt: Any) -> dict[str, str]:  # noqa: ANN401
+    """The store identity ``GeoTesseraZarr`` reports, once it is known to be the dClimate v1.1 dataset.
+
+    Args:
+        gt: A ``geotessera.GeoTesseraZarr`` opened on :data:`STORE_URL`.
+
+    Returns:
+        ``url``, ``dataset``, ``model_version`` and ``build_version``, as geotessera gives them.
+
+    Raises:
+        DatasetMismatchError: ``gt.dataset`` is None or names another dataset.
+    """
+    dataset = getattr(gt, "dataset", None)
+    name = None if dataset is None else getattr(dataset, "name", None)
+    if name != DATASET_NAME:
+        raise DatasetMismatchError(None if name is None else str(name))
+    return {
+        "url": str(gt.url),
+        "dataset": str(name),
+        "model_version": str(gt.model_version),
+        "build_version": str(gt.build_version),
+    }
+
+
+def _unwrap(store: Store) -> tuple[Store, Callable[[Store], Store] | None]:
+    """Split a chain of zarr wrapper stores into the store at the bottom and a function re-applying the chain.
+
+    Each wrapper is re-applied with ``WrapperStore._with_store``, the hook zarr itself uses to copy a
+    wrapper onto another store (``with_read_only``), so a wrapper keeps whatever it shares between
+    copies, such as a key log's list.
+    """
+    chain: list[WrapperStore[Any]] = []
+    while isinstance(store, WrapperStore) and len(chain) < 16:
+        chain.append(store)
+        store = store._store
+    if not chain:
+        return store, None
+
+    def rewrap(inner: Store) -> Store:
+        for wrapper in reversed(chain):
+            inner = wrapper._with_store(inner)
+        return inner
+
+    return store, rewrap
+
+
+_COPIES: dict[str, Path] = {}
+_COPIES_LOCK = threading.Lock()
+_COPIES_ROOT: list[Path] = []
+#: Writes in flight while a store is copied into a local Icechunk repository.
+_COPY_CONCURRENCY = 64
+
+
+def _copies_root() -> Path:
+    """The temporary directory holding this process's local store copies, removed at exit."""
+    if not _COPIES_ROOT:
+        root = Path(tempfile.mkdtemp(prefix="tessera-apps-stores-"))
+        atexit.register(shutil.rmtree, root, ignore_errors=True)
+        _COPIES_ROOT.append(root)
+    return _COPIES_ROOT[0]
+
+
+async def _store_items(store: Store) -> list[tuple[str, Buffer]]:
+    prototype = default_buffer_prototype()
+    keys = sorted([key async for key in store.list()])
+    items = []
+    for key in keys:
+        buf = await store.get(key, prototype)
+        if buf is not None:
+            items.append((key, buf))
+    return items
+
+
+async def _write_items(target: Store, items: Sequence[tuple[str, Buffer]]) -> None:
+    # Icechunk needs a node's metadata before its children and chunks: metadata goes first, parents
+    # before children, then the chunks concurrently.
+    meta = sorted((kv for kv in items if is_metadata_key(kv[0])), key=lambda kv: (kv[0].count("/"), kv[0]))
+    for key, buf in meta:
+        await target.set(key, buf)
+    gate = asyncio.Semaphore(_COPY_CONCURRENCY)
+
+    async def put(key: str, buf: Buffer) -> None:
+        async with gate:
+            await target.set(key, buf)
+
+    await asyncio.gather(*(put(key, buf) for key, buf in items if not is_metadata_key(key)))
+
+
+def _materialise(store: Store) -> Path:
+    """Copy a zarr store, key for key and byte for byte, into a local Icechunk repository.
+
+    The copy lives in a temporary directory removed when the process exits. A store whose keys and
+    bytes match an earlier copy reuses it, so the tests' shared stores are copied once.
+
+    Args:
+        store: Any listable zarr store (not a wrapper; see :meth:`TesseraReader.from_store`).
+
+    Returns:
+        The repository's path, for :class:`CountedIcechunkStore`.
+
+    Raises:
+        TesseraError: The store cannot be listed, or Icechunk refuses one of its keys.
+    """
+    import icechunk
+
+    if not store.supports_listing:
+        raise TesseraError(f"{type(store).__name__} cannot be listed, so it cannot be copied for the reader.")
+    items = sync(_store_items(store))
+    digest = hashlib.sha256()
+    for key, buf in items:
+        data = buf.as_numpy_array()
+        digest.update(key.encode())
+        digest.update(len(data).to_bytes(8, "little"))
+        digest.update(data)
+    name = digest.hexdigest()[:32]
+    with _COPIES_LOCK:
+        path = _COPIES.get(name)
+        if path is None:
+            path = _copies_root() / name / "store.icechunk"
+            try:
+                repo = icechunk.Repository.create(icechunk.local_filesystem_storage(str(path)))
+                session = repo.writable_session("main")
+                sync(_write_items(session.store, items))
+                session.commit(f"tessera_apps.io: a copy of a {type(store).__name__} for TesseraReader.from_store")
+            except (icechunk.IcechunkError, ValueError) as exc:
+                shutil.rmtree(path.parent, ignore_errors=True)
+                what = type(store).__name__
+                reason = _icechunk_message(exc)
+                raise TesseraError(f"Cannot copy the {what} into a local Icechunk repository: {reason}.") from exc
+            _COPIES[name] = path
+    return path
+
+
+@dataclasses.dataclass(frozen=True)
+class _ZoneView:
+    """Where one zone group sits on geotessera's merged view of its zone: its arrays and the offsets."""
+
+    arrays: dict[str, Any]
+    row_offset: int
+    col_offset: int
+
+
+def _whole_pixels(value: float, what: str) -> int:
+    """An offset in pixels that must be whole, or a TesseraError naming it."""
+    rounded = round(value)
+    if abs(value - rounded) > 1e-6:
+        raise TesseraError(f"{what} is {value} pixels, not a whole number; the grids are out of phase.")
+    return int(rounded)
+
+
+def _strip_edges(start: int, stop: int, own0: int, step: int) -> list[int]:
+    """Row edges of the strips :meth:`TesseraReader._read_job` reads embeddings in.
+
+    From the group's first own row on (see :meth:`TesseraReader.own_rows`) the edges are multiples
+    of ``step``, a whole number of the group's chunk rows. Above it, where geotessera serves a south
+    group's rows from the north group, they step up from ``own0``: on the live grids the north group
+    ends on the equator at a chunk edge, so those are its chunk-row edges. Either way no source chunk
+    row is split between two strips.
+
+    Args:
+        start: First group row of the window.
+        stop: Row past the window's last.
+        own0: The group's first own row.
+        step: Strip height in rows, a multiple of the chunk height.
+
+    Returns:
+        ``[start, ..., stop]``, ascending; just ``[start]`` when the window is empty.
+    """
+    edges = [start]
+    r = start
+    while r < stop:
+        r = min(stop, own0 - ((own0 - r - 1) // step) * step if r < own0 else (r // step + 1) * step)
+        edges.append(r)
+    return edges
 
 
 # --------------------------------------------------------------------------------------------
@@ -601,27 +943,22 @@ class _Job:
 
 
 class TesseraReader:
-    """Reader for the published Icechunk store (or any zarr store with the same layout).
+    """Reader for the published store through geotessera (or any zarr store with the same layout).
 
     Use :meth:`open` for the live store and :meth:`from_store` for any other zarr store, such as the
-    in-memory stores the tests build. Arrays are read with plain zarr indexing, so nothing goes
-    through Dask.
+    in-memory stores the tests build. Both read through a :class:`CountedIcechunkStore`, so every
+    chunk read goes through geotessera's merged zone arrays and nothing goes through Dask.
     """
 
     def __init__(
         self,
-        root: zarr.Group,
+        store: CountedIcechunkStore,
         *,
-        counter: ByteCounter | None = None,
         provenance: dict[str, Any] | None = None,
         cache: ChunkCache | None = None,
     ) -> None:
-        self._root = root
-        found = counter if counter is not None else _find_counter(root.store)
-        if found is None:
-            logger.warning("The store is not wrapped in a CountingStore; bytes_read will stay 0. Use from_store.")
-            found = ByteCounter()
-        self._counter = found
+        self._store = store
+        self._counter = store.counter
         self._provenance = dict(provenance or {})
         if cache is not None and cache.namespace == ChunkCache.UNPINNED:
             snapshot = self._provenance.get("snapshot_id")
@@ -636,7 +973,9 @@ class TesseraReader:
         self._arrays: dict[tuple[str, str], zarr.Array] = {}
         self._attrs: dict[str, dict[str, Any]] = {}
         self._grids: dict[str, ZoneGrid] = {}
-        self._time_index: dict[str, dict[int, int]] = {}
+        self._views: dict[str, _ZoneView] = {}
+        self._incomplete: dict[str, list[int]] | None = None
+        self._lock = threading.Lock()
 
     @classmethod
     def open(
@@ -646,7 +985,12 @@ class TesseraReader:
         branch: str = "main",
         cache: ChunkCache | None = None,
     ) -> TesseraReader:
-        """Open the published store anonymously.
+        """Open the published store anonymously, through geotessera.
+
+        ``GeoTesseraZarr(store_url=STORE_URL)`` gives the store's identity and must name the dClimate
+        v1.1 dataset before anything else happens. The reads then go through a
+        :class:`CountedIcechunkStore` at ``snapshot_id``, or at the head of ``branch`` as it stands
+        now; either way the snapshot read is recorded in :meth:`provenance`.
 
         Args:
             snapshot_id: Pin an Icechunk snapshot. Pin one for reproducible runs; the id is recorded
@@ -660,53 +1004,95 @@ class TesseraReader:
             StoreUnavailableError: The store cannot be reached, ``snapshot_id`` is not a valid id or
                 not one of the store's snapshots, or ``branch`` does not exist. The message is
                 icechunk's, without its internal stack.
+            DatasetMismatchError: geotessera does not identify the store as ``1.1-dclimate``, or the
+                snapshot read holds another model than the one geotessera reports.
         """
         import icechunk
+        from geotessera import GeoTesseraZarr
 
-        storage = icechunk.s3_storage(bucket=STORE_BUCKET, prefix=STORE_PREFIX, region=STORE_REGION, anonymous=True)
-        try:
-            # Pass no config: a config here replaces the one saved with the store wholesale.
-            repo = icechunk.Repository.open(storage)
-            session = repo.readonly_session(snapshot_id=snapshot_id) if snapshot_id else repo.readonly_session(branch)
-            counting = CountingStore(session.store)
-            root = zarr.open_group(counting, mode="r")
-        except icechunk.IcechunkError as exc:
-            where = f"snapshot {snapshot_id}" if snapshot_id else f"branch {branch!r}"
+        where = f"snapshot {snapshot_id}" if snapshot_id else f"branch {branch!r}"
+
+        def unavailable(exc: BaseException) -> StoreUnavailableError:
             hint = f"Check that this machine can reach S3 in {STORE_REGION} (no AWS credentials are needed)"
             if snapshot_id:
                 hint += " and that the snapshot id is one of the store's (tessera-apps info prints the current one)"
-            raise StoreUnavailableError(
+            return StoreUnavailableError(
                 f"Cannot open the store {STORE_URL} at {where}: {_icechunk_message(exc)}. {hint}."
-            ) from exc
+            )
+
+        try:
+            gt = GeoTesseraZarr(store_url=STORE_URL)
+        except (icechunk.IcechunkError, ValueError) as exc:
+            raise unavailable(exc) from exc
+        identity = check_dataset(gt)
+        try:
+            store = CountedIcechunkStore(STORE_URL, branch=branch, snapshot_id=snapshot_id)
+        except (icechunk.IcechunkError, ValueError) as exc:
+            raise unavailable(exc) from exc
+        except KeyError as exc:
+            raise TesseraError(f"geotessera cannot open {STORE_URL} at {where}: {exc!r}.") from exc
+        snapshot = store.snapshot_id
+        model = store.root.attrs.get("geoemb:model")
+        if model is not None and str(model) != identity["model_version"]:
+            raise DatasetMismatchError(
+                identity["dataset"],
+                f"Snapshot {snapshot} of {STORE_URL} holds model {model}, but geotessera reports the store's model as "
+                f"{identity['model_version']} (from the head of main).",
+            )
+        # GeoTesseraZarr reads build_version at the head of main, which a pinned snapshot (or a head
+        # that moved since) need not share. The store block describes the data read, so it takes the
+        # snapshot's own value and keeps geotessera's beside it when the two differ.
+        build = store.root.attrs.get("geoemb:build_version")
+        if build is not None and str(build) != identity["build_version"]:
+            logger.warning(
+                "Snapshot %s holds build %s; geotessera reports build %s from the head of main. Recording %s.",
+                snapshot,
+                build,
+                identity["build_version"],
+                build,
+            )
+            identity = {**identity, "build_version": str(build), "head_build_version": identity["build_version"]}
         provenance = {
-            "backend": "icechunk",
-            "store_url": STORE_URL,
-            "snapshot_id": session.snapshot_id,
+            "backend": "geotessera",
+            **identity,
+            "snapshot_id": snapshot,
             "branch": None if snapshot_id else branch,
             "icechunk_version": getattr(icechunk, "__version__", None),
             "zarr_version": zarr.__version__,
         }
         if cache is not None:
-            cache = cache.for_namespace(str(session.snapshot_id))
-        return cls(root, counter=counting.counter, provenance=provenance, cache=cache)
+            cache = cache.for_namespace(snapshot)
+        logger.info("Reading %s (%s) at snapshot %s through geotessera.", STORE_URL, identity["dataset"], snapshot)
+        return cls(store, provenance=provenance, cache=cache)
 
     @classmethod
     def from_store(cls, store: Any, *, cache: ChunkCache | None = None, **provenance: Any) -> TesseraReader:  # noqa: ANN401
-        """Wrap any zarr store (for example a ``MemoryStore`` in tests) with byte counting.
+        """Read any zarr store with the published layout (for example a ``MemoryStore`` in tests).
+
+        The store is copied, key for key, into a local Icechunk repository (once per distinct
+        content, see :func:`_materialise`), which is then read exactly as :meth:`open` reads the
+        published store: through a :class:`CountedIcechunkStore` and geotessera's zone arrays. Wrapper
+        stores around ``store`` (zarr ``WrapperStore`` subclasses, such as the tests' key log) are
+        re-applied around the copy's session store, inside the byte counter, so they see every read
+        the reader makes. The dataset check of :meth:`open` does not apply: a local copy is not a
+        published dataset, and no ``GeoTesseraZarr`` is opened.
 
         A cache must carry an explicit namespace, or ``snapshot_id`` must be passed in
-        ``provenance``.
+        ``provenance`` (the copy's own snapshot id names a throwaway copy, not the data).
         """
-        counting = CountingStore(store)
-        root = zarr.open_group(counting, mode="r")
+        base, rewrap = _unwrap(store)
+        try:
+            counted = CountedIcechunkStore(_materialise(base), wrap=rewrap)
+        except (KeyError, ValueError) as exc:
+            raise TesseraError(f"geotessera cannot open the copy of the {type(base).__name__}: {exc!r}.") from exc
         prov = {"backend": type(store).__name__, **provenance}
-        return cls(root, counter=counting.counter, provenance=prov, cache=cache)
+        return cls(counted, provenance=prov, cache=cache)
 
     # ---- metadata -------------------------------------------------------------------------
 
     @property
     def bytes_read(self) -> int:
-        """Payload bytes fetched from the store so far (cache hits are free)."""
+        """Chunk payload bytes fetched from the store so far (cache hits are free; see :class:`CountingStore`)."""
         return self._counter.bytes
 
     @property
@@ -714,13 +1100,17 @@ class TesseraReader:
         """The chunk cache in use, if any."""
         return self._cache
 
+    @property
+    def store(self) -> CountedIcechunkStore:
+        """The geotessera store every read goes through."""
+        return self._store
+
     def _group(self, zone: str) -> zarr.Group:
         z = canonicalize_zone(zone)
         if z not in self._groups:
-            try:
-                node = self._root[z]
-            except KeyError as exc:
-                raise TesseraError(f"Zone group {z} is not in the store.") from exc
+            if z not in self._store.groups:
+                raise TesseraError(f"Zone group {z} is not in the store.")
+            node = self._store.root[z]
             if not isinstance(node, zarr.Group):
                 raise TesseraError(f"{z} is not a zarr group.")
             self._groups[z] = node
@@ -744,14 +1134,27 @@ class TesseraReader:
 
     def root_attrs(self) -> dict[str, Any]:
         """Attributes of the root group (model provenance)."""
-        return dict(self._root.attrs)
+        return dict(self._store.root.attrs)
 
     def grid(self, zone: str) -> ZoneGrid:
-        """Pixel grid of a zone group."""
+        """Pixel grid of a zone group.
+
+        Raises:
+            TesseraError: The group is not in the store, its transform is unusable (see
+                :meth:`ZoneGrid.from_attrs`), or its ``spatial:shape``, which geotessera builds its
+                merged view from, disagrees with the arrays.
+        """
         z = canonicalize_zone(zone)
         if z not in self._grids:
             shape = self._array(z, "scales").shape
-            self._grids[z] = ZoneGrid.from_attrs(z, self.zone_attrs(z), (shape[1], shape[2]))
+            attrs = self.zone_attrs(z)
+            grid = ZoneGrid.from_attrs(z, attrs, (shape[1], shape[2]))
+            declared = attrs.get("spatial:shape")
+            if declared is not None and [int(v) for v in declared] != [grid.height, grid.width]:
+                raise TesseraError(
+                    f"Zone {z} declares spatial:shape {list(declared)} but its arrays are {grid.height} x {grid.width}."
+                )
+            self._grids[z] = grid
         return self._grids[z]
 
     def chunk_shape(self, zone: str) -> tuple[int, int]:
@@ -759,23 +1162,48 @@ class TesseraReader:
         chunks = self._array(zone, "embeddings").chunks
         return int(chunks[1]), int(chunks[2])
 
+    def store_years(self) -> list[int]:
+        """Calendar years on the store's time axis, as geotessera decodes them (``IcechunkStore.years``).
+
+        Raises:
+            TesseraError: The axis is not consecutive years from 2017: the store layout has changed.
+        """
+        years = [int(y) for y in self._store.years]
+        expected = list(range(FIRST_YEAR, FIRST_YEAR + len(years)))
+        if not years or years != expected:
+            raise TesseraError(
+                f"time coordinate decodes to years {years}, expected consecutive years from {FIRST_YEAR}; the store "
+                "layout has changed."
+            )
+        return years
+
+    def _incomplete_years(self) -> dict[str, list[int]]:
+        """The store's ``incomplete_years()`` (geotessera), read once: attributes of every group, no chunk."""
+        if self._incomplete is None:
+            found = self._store.incomplete_years()
+            self._incomplete = {canonicalize_zone(str(g)): [int(y) for y in ys] for g, ys in found.items()}
+        return self._incomplete
+
     def years_complete(self, zone: str) -> list[int]:
-        """Years listed in the zone's ``years_complete`` attribute, sorted."""
-        raw = self.zone_attrs(zone).get("years_complete")
-        if raw is None:
-            raise TesseraError(f"Zone {canonicalize_zone(zone)} has no years_complete attribute.")
-        return sorted(int(y) for y in raw)
+        """Years a zone group has published: the store's years less those geotessera finds incomplete.
+
+        Raises:
+            TesseraError: The group is not in the store, or has no ``years_complete`` attribute
+                (which geotessera would read as complete).
+        """
+        z = canonicalize_zone(zone)
+        if self.zone_attrs(z).get("years_complete") is None:
+            raise TesseraError(f"Zone {z} has no years_complete attribute.")
+        missing = set(self._incomplete_years().get(z, []))
+        return [y for y in self.store_years() if y not in missing]
 
     def year_index(self, zone: str, year: int) -> int:
         """Position of a calendar year on a zone's time axis."""
         z = canonicalize_zone(zone)
-        if z not in self._time_index:
-            n = int(self._array(z, "scales").shape[0])
-            years = _decode_years(self._group(z), n)
-            self._time_index[z] = {y: i for i, y in enumerate(years)}
+        self._group(z)
         try:
-            return self._time_index[z][year]
-        except KeyError as exc:
+            return self.store_years().index(year)
+        except ValueError as exc:
             raise YearsNotPublishedError({z: [year]}) from exc
 
     def check_years(self, zones: Iterable[str], years: Iterable[int]) -> None:
@@ -789,8 +1217,13 @@ class TesseraReader:
     def provenance(self) -> dict[str, Any]:
         """Store and model identity for reports.
 
-        ``checkpoint_id`` names the model weights and never changes, so the data version is the
-        Icechunk ``snapshot_id``.
+        For the published store: geotessera's ``url``, ``dataset``, ``model_version`` and
+        ``build_version``, and the Icechunk ``snapshot_id`` read, which is the data version
+        (``checkpoint_id`` names the model weights and never changes). geotessera takes the two
+        versions from the head of main; the model must match the snapshot read (:meth:`open` refuses
+        another), and when the snapshot's ``geoemb:build_version`` differs, ``build_version`` is the
+        snapshot's and ``head_build_version`` keeps geotessera's. The model keys of the root
+        attributes at that snapshot are added for the report's ``model`` block.
         """
         attrs = self.root_attrs()
         out = dict(self._provenance)
@@ -807,6 +1240,77 @@ class TesseraReader:
             run = runs.get(str(y)) or {}
             out[y] = (run.get("code") or {}).get("commit")
         return out
+
+    # ---- geotessera's merged view -----------------------------------------------------------
+
+    def _zone_view(self, zone: str) -> _ZoneView:
+        """The zone group's place on geotessera's merged zone, built on the zone's first read."""
+        z = canonicalize_zone(zone)
+        view = self._views.get(z)
+        if view is None:
+            with self._lock:
+                view = self._views.get(z)
+                if view is None:
+                    view = self._build_view(z)
+                    self._views[z] = view
+        return view
+
+    def _build_view(self, z: str) -> _ZoneView:
+        self.grid(z)
+        number = int(z[:2])
+        try:
+            merged = self._store.open_zone(number)
+            arrays = dict(self._store.zone_arrays(number))
+        except (KeyError, ValueError) as exc:
+            raise TesseraError(f"geotessera cannot build its view of zone {number:02d}: {exc}") from exc
+        for name, dims in (("embeddings", ("time", "band", "y", "x")), ("scales", ("time", "y", "x"))):
+            if name not in arrays or tuple(arrays[name].dims) != dims:
+                got = None if name not in arrays else tuple(arrays[name].dims)
+                raise TesseraError(f"geotessera's view of zone {number:02d} has {name} dims {got}, expected {dims}.")
+        px, _, west, _, _, top = (float(v) for v in merged.attrs["spatial:transform"])
+        # The group's transform as geotessera reads it (not the corner ZoneGrid may correct it to),
+        # in the northern CRS, so the offsets are taken between the two grids geotessera itself aligns.
+        raw = [float(v) for v in self.zone_attrs(z)["spatial:transform"]]
+        group_top = raw[5] - (FALSE_NORTHING if z.endswith("S") else 0.0)
+        row_offset = _whole_pixels((top - group_top) / px, f"The row offset of {z} on geotessera's zone {number:02d}")
+        col_offset = _whole_pixels((raw[2] - west) / px, f"The column offset of {z} on geotessera's zone {number:02d}")
+        logger.debug("%s on geotessera zone %02d: offset (%d, %d)", z, number, row_offset, col_offset)
+        return _ZoneView(arrays=arrays, row_offset=row_offset, col_offset=col_offset)
+
+    def own_rows(self, zone: str) -> tuple[int, int]:
+        """The group rows geotessera reads from the group itself, as ``(start, stop)``. Attributes only.
+
+        geotessera takes rows centred north of the equator from the north group and the rest from the
+        south group, judging centres by each group's ``spatial:transform`` as stored. Every row of a
+        live north group qualifies; a south group's first 1,472 rows (north of the equator) do not.
+        """
+        z = canonicalize_zone(zone)
+        grid = self.grid(z)
+        t = [float(v) for v in self.zone_attrs(z)["spatial:transform"]]
+        group_top = t[5] - (FALSE_NORTHING if z.endswith("S") else 0.0)
+        # Group row i is centred at group_top - (i + 0.5) * pixel: north of the equator for i < edge.
+        edge = group_top / t[0] - 0.5
+        if z.endswith("N"):
+            return 0, min(grid.height, max(0, math.ceil(edge)))
+        return min(grid.height, max(0, math.floor(edge) + 1)), grid.height
+
+    def _check_served(self, zone: str, r1: int) -> None:
+        """Refuse north-group rows that geotessera does not serve from the north group.
+
+        Live north groups end at northing 0, so geotessera serves every row from them. Snapshots before
+        ``B6AFRJGX5XQC0A716PA0`` register ``spatial:transform`` at the pixel centre, half a pixel off,
+        which puts a north group's bottom row on the equator, and geotessera then serves it from
+        neither group. South-group rows north of the equator are allowed: geotessera serves them from
+        the north group (see the module docstring).
+        """
+        stop = self.own_rows(zone)[1]
+        if zone.endswith("N") and r1 > stop:
+            raise TesseraError(
+                f"Rows {stop} to {r1} of zone {zone} are centred on or south of the equator by its spatial:transform, "
+                "so geotessera does not read them from that group. Snapshots before B6AFRJGX5XQC0A716PA0 register "
+                "the transform at the pixel centre, which puts a north group's bottom row on the equator; pin "
+                "B6AFRJGX5XQC0A716PA0 or a later snapshot."
+            )
 
     # ---- reads ----------------------------------------------------------------------------
 
@@ -843,6 +1347,11 @@ class TesseraReader:
         self.check_years([z], years)
         grid = self.grid(z)
         r0, r1, c0, c1 = _check_window(grid, rows, cols)
+        if self._cache is not None:  # a miss reads the chunk-aligned cover
+            ch = self.chunk_shape(z)[0]
+            self._check_served(z, min(-(-r1 // ch) * ch, grid.height))
+        else:
+            self._check_served(z, r1)
         names = ["scales", *[n for n in layers if n != "scales"]]
         jobs = [_Job(z, n, y, self.year_index(z, y), r0, r1, c0, c1) for y in years for n in names]
         arrays = self._run(jobs)
@@ -869,13 +1378,60 @@ class TesseraReader:
         return list(_POOL.map(task, jobs))
 
     def _read_job(self, job: _Job) -> np.ndarray:
-        arr = self._array(job.zone, job.name)
-        if arr.ndim == 4:
-            return np.asarray(arr[job.t, job.r0 : job.r1, job.c0 : job.c1, :])
-        return np.asarray(arr[job.t, job.r0 : job.r1, job.c0 : job.c1])
+        """One layer of one year over one window, from geotessera's merged zone arrays.
+
+        The window moves onto the merged grid by the zone view's offsets. Group rows that land above
+        the merged grid's top edge (a south group's rows north of the equator, in a zone with no
+        north group) are served by no group and come back as fill, as geotessera returns any row no
+        group serves; a window reaching past the merged grid's other edges is refused. Embeddings
+        are read in strips of whole chunk rows, as many as fit in :data:`_STRIP_BYTES` and at least
+        one (:func:`_strip_edges`), each strip's ``(band, y, x)`` block transposed into one
+        preallocated C-contiguous ``(y, x, band)`` output, so the transient memory is one strip, not
+        the window; at most ``TESSERA_APPS_EMBEDDING_READS`` (4) of those reads run at once.
+
+        Raises:
+            TesseraError: geotessera's view has no such array, or the window falls outside it.
+        """
+        view = self._zone_view(job.zone)
+        array = view.arrays.get(job.name)
+        if array is None:
+            raise TesseraError(f"geotessera's view of zone {job.zone[:2]} has no {job.name} array.")
+        height, width = (int(array.shape[array.dims.index(d)]) for d in ("y", "x"))
+        ro, co = view.row_offset, view.col_offset
+        if job.r1 + ro > height or job.c0 + co < 0 or job.c1 + co > width:
+            raise TesseraError(
+                f"Rows {job.r0}:{job.r1}, cols {job.c0}:{job.c1} of zone {job.zone} fall outside geotessera's "
+                f"{height} x {width} view of zone {job.zone[:2]} (the group sits at offset ({ro}, {co}) on it)."
+            )
+        n = job.r1 - job.r0
+        lead = min(max(0, -(job.r0 + ro)), n)  # rows above the merged grid
+        cols = slice(job.c0 + co, job.c1 + co)
+        if job.name != "embeddings":
+            if lead == 0:
+                return np.asarray(array[job.t, job.r0 + ro : job.r1 + ro, cols])
+            out = np.full((n, job.c1 - job.c0), array.fill_value, dtype=array.dtype)
+            if lead < n:
+                out[lead:] = array[job.t, job.r0 + lead + ro : job.r1 + ro, cols]
+            return out
+        bands = int(array.shape[array.dims.index("band")])
+        chunk = self.chunk_shape(job.zone)[0]
+        per_strip = max(1, _STRIP_BYTES // (chunk * (job.c1 - job.c0) * bands * array.dtype.itemsize))
+        edges = _strip_edges(job.r0 + lead, job.r1, self.own_rows(job.zone)[0], chunk * per_strip)
+        with _EMBEDDING_READS:
+            out = np.empty((n, job.c1 - job.c0, bands), dtype=array.dtype)
+            out[:lead] = array.fill_value
+            for r, stop in itertools.pairwise(edges):
+                out[r - job.r0 : stop - job.r0] = np.moveaxis(array[job.t, :, r + ro : stop + ro, cols], 0, -1)
+        return out
 
     def _read_job_cached(self, job: _Job) -> np.ndarray:
-        """Serve a job from whole cached chunks; on any miss, fetch the chunk-aligned cover in one call."""
+        """Serve a job from whole cached chunks; on any miss, fetch the chunk-aligned cover in one call.
+
+        Cached chunks hold what an uncached read of them returns. So in a south group whose first own
+        row is inside a chunk row (row 1472 of chunk row 5, live), a cover that takes that chunk row
+        also fetches the north group's chunk serving its rows above the equator, though only rows
+        inside the zone's band are ever used.
+        """
         cache = self._cache
         assert cache is not None
         ch, cw = self.chunk_shape(job.zone)
@@ -919,46 +1475,6 @@ class TesseraReader:
                 ir0 - br0 : ir1 - br0, ic0 - bc0 : ic1 - bc0
             ]
         return out
-
-
-def _decode_years(group: zarr.Group, n: int) -> list[int]:
-    """Calendar years on a zone's time axis.
-
-    Decodes the ``time`` coordinate when it carries CF units, and otherwise falls back to the
-    documented layout: ``n`` consecutive years from 2017.
-
-    Raises:
-        TesseraError: The time coordinate decodes to anything other than ``n`` years from 2017.
-    """
-    fallback = list(range(FIRST_YEAR, FIRST_YEAR + n))
-    try:
-        node = group["time"]
-    except KeyError:
-        return fallback
-    if not isinstance(node, zarr.Array):
-        return fallback
-    values = np.asarray(node[:])
-    if np.issubdtype(values.dtype, np.datetime64):
-        decoded = [int(v) for v in values.astype("datetime64[Y]").astype(int) + 1970]
-        if decoded != fallback:
-            raise TesseraError(f"time coordinate decodes to years {decoded}, expected {fallback}.")
-        return decoded
-    units = str(node.attrs.get("units", ""))
-    m = re.fullmatch(r"\s*(\w+)\s+since\s+(\d{4}-\d{2}-\d{2})(?:[ T][\d:.]+)?\s*", units)
-    if not m:
-        return fallback
-    unit = {"nanoseconds": "ns", "microseconds": "us", "milliseconds": "ms", "seconds": "s", "days": "D"}.get(
-        m.group(1)
-    )
-    if unit is None:
-        return fallback
-    stamps = np.datetime64(m.group(2)) + values.astype(np.int64).astype(f"timedelta64[{unit}]")
-    years = [int(v) for v in stamps.astype("datetime64[Y]").astype(int) + 1970]
-    if years != fallback:
-        raise TesseraError(
-            f"time coordinate decodes to years {years}, expected {fallback}; the store layout has changed."
-        )
-    return years
 
 
 def _check_window(grid: ZoneGrid, rows: slice, cols: slice) -> tuple[int, int, int, int]:
@@ -1416,7 +1932,7 @@ def read_points(
     keys = list(groups)
     for start in range(0, len(keys), _POINT_BATCH):
         batch = keys[start : start + _POINT_BATCH]
-        windows = list(_GROUP_POOL.map(lambda key: _read_chunk(reader, key, year, layers), batch))
+        windows = list(_GROUP_POOL.map(lambda key: _read_chunk(reader, key, groups[key], year, layers), batch))
         for key, win in zip(batch, windows, strict=True):
             ok = win.valid
             rp = win.radar_present if radar is not None else None
@@ -1432,17 +1948,38 @@ def read_points(
     return PointRead(embeddings=out, valid=valid, zones=zones, radar_present=radar, chunks_read=len(groups))
 
 
-def _read_chunk(reader: Reader, key: tuple[str, int, int], year: int, layers: Sequence[str]) -> Window:
+def _read_chunk(
+    reader: Reader, key: tuple[str, int, int], points: Sequence[tuple[int, int, int]], year: int, layers: Sequence[str]
+) -> Window:
+    """Read the chunk a group of points falls in.
+
+    The window is the whole chunk, except that it starts no higher than the group's first own row
+    (``own_rows``, when the reader has it) unless a point lies above that. In a south group the rows
+    above it are served from the north group, so reading them would fetch the north group's bottom
+    chunk for pixels no point uses; the points of a south zone always lie at or below it.
+
+    Args:
+        reader: The reader.
+        key: ``(zone, chunk row, chunk col)``.
+        points: ``(point index, row, col)`` of each point in the chunk.
+        year: Year to read.
+        layers: Layers to read.
+    """
     zone, cr, cc = key
     grid = reader.grid(zone)
     ch, cw = reader.chunk_shape(zone)
-    rows = slice(cr * ch, min((cr + 1) * ch, grid.height))
+    start = cr * ch
+    own_rows = getattr(reader, "own_rows", None)  # the tests' metadata-only readers have none
+    if own_rows is not None:
+        start = max(start, min(int(own_rows(zone)[0]), min(r for _, r, _ in points)))
+    rows = slice(start, min((cr + 1) * ch, grid.height))
     cols = slice(cc * cw, min((cc + 1) * cw, grid.width))
     return reader.read_window(zone, year, rows, cols, layers=layers)
 
 
 __all__ = [
     "ALL_LAYERS",
+    "DATASET_NAME",
     "DEFAULT_BLOCK",
     "DEFAULT_LAYERS",
     "FIRST_YEAR",
@@ -1457,7 +1994,9 @@ __all__ = [
     "AOIPlan",
     "Block",
     "ByteCounter",
+    "CountedIcechunkStore",
     "CountingStore",
+    "DatasetMismatchError",
     "PointRead",
     "ReadTooLargeError",
     "Reader",
@@ -1469,6 +2008,7 @@ __all__ = [
     "ZoneGrid",
     "ZonePlan",
     "canonicalize_zone",
+    "check_dataset",
     "iter_blocks",
     "iter_plan_blocks",
     "iter_strips",

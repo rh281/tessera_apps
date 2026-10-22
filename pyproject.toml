@@ -27,6 +27,11 @@ classifiers = [
 # Floors follow docs/prebuild-survey.md (B1). The published store is in the Icechunk v2 repository
 # format, which icechunk 1.x cannot open, and sharded arrays inside Icechunk need a recent zarr.
 dependencies = [
+    # Every embedding read goes through geotessera, the University of Cambridge client (handoff 0.2.0,
+    # item 0). 0.11 is the first release that opens the dClimate v1.1 Icechunk store and identifies it
+    # as dataset 1.1-dclimate; earlier ones read the legacy v1 model (survey B2). Pinned below 0.12
+    # because the reader uses IcechunkStore's public attributes, whose 0.x API may still change.
+    "geotessera>=0.11,<0.12",
     "icechunk>=2.2,<3",
     "zarr>=3.3",
     # PCodec decodes the `scales` arrays in the Icechunk store.

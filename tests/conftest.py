@@ -56,6 +56,10 @@ class KeyLog(WrapperStore[Any]):
         return [k for k in self.log if "/c/" in k or k.split("/")[-1].startswith("c")]
 
 
+#: Dimension names of a zone group's (time, row, col) arrays, as the live store names them.
+GRID_DIMS = ("time", "northing", "easting")
+
+
 def _time_values(n: int) -> np.ndarray:
     stamps = np.array([f"{FIRST_YEAR + i}-01-01" for i in range(n)], dtype="datetime64[ns]")
     return stamps.astype(np.int64)
@@ -87,7 +91,7 @@ def add_zone(
         }
     )
     n = len(YEARS)
-    t = g.create_array("time", shape=(n,), dtype="int64", fill_value=0)
+    t = g.create_array("time", shape=(n,), dtype="int64", fill_value=0, dimension_names=("time",))
     t[:] = _time_values(n)
     t.attrs["units"] = "nanoseconds since 1970-01-01"
     specs = {
@@ -98,7 +102,11 @@ def add_zone(
         "s1_desc_obs_count": ((n, height, width), "uint16", 0, (1, chunk, chunk), (1, shard, shard)),
     }
     for name, (shape, dtype, fv, chunks, shards) in specs.items():
-        arr = g.create_array(name, shape=shape, dtype=dtype, fill_value=fv, chunks=chunks, shards=shards)
+        # Named dimensions, as the live arrays have them: geotessera builds its merged zone view from them.
+        dims = GRID_DIMS + (("band",) if len(shape) == 4 else ())
+        arr = g.create_array(
+            name, shape=shape, dtype=dtype, fill_value=fv, chunks=chunks, shards=shards, dimension_names=dims
+        )
         for ti in range(n):
             arr[ti] = fill(name, ti, shape[1:])
     return g
