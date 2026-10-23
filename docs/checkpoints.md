@@ -795,3 +795,25 @@ The cost is time. Bytes read are the same to within 0.01%. The reader no longer 
 
 - **File the drafted geotessera issue.** Once the library takes a snapshot and an `IcechunkStore` or store wrapper, move the reads onto `GeoTesseraZarr` itself and drop the subclass.
 - **Item 1** (real NIFC, MTBS, GMW and EFFIS references) needs a machine that can reach those hosts.
+
+## 0.2.0, checkpoint C: a real restoration site (2026-10-23)
+
+**Not done: no public polygon can be reached from this build environment.** No `restore_site_owner.geojson` came with the handoff. All four sources were tried on 2026-10-23, and each host refuses the connection at the environment's proxy (403 on CONNECT, recorded as a policy denial):
+
+| Source | Hosts tried | Result |
+|---|---|---|
+| USFS FACTS (the loader exists) | `apps.fs.usda.gov` (EDW_SilvicultureReforestation MapServer), `data.fs.usda.gov` (EDW downloads), `data-usfs.hub.arcgis.com`, `enterprisecontent-usfs.opendata.arcgis.com`, `catalog.data.gov` | blocked |
+| Restor open projects | `restor.eco`, `api.restor.eco` | blocked |
+| Plant-for-the-Planet | `app.plant-for-the-planet.org`, `api1.plant-for-the-planet.org`, `www.plant-for-the-planet.org` | blocked |
+| Global Forest Watch restoration layers | `data-api.globalforestwatch.org`, `data.globalforestwatch.org`, `www.globalforestwatch.org`, TerraMatch (`www.terramatch.org`, `api.terramatch.org`) | blocked |
+| | the GFW data lake `gfw-data-lake.s3.amazonaws.com` | reachable, but a requester-pays bucket: it refuses anonymous reads, and the package must never need AWS credentials |
+
+Because no host answered, none of the other reasons the handoff lists (no 2019 to 2020 projects, no boundary file, a licence) could be checked. `itapebi` and `jaru` stay the bundled restore demos, labelled synthetic.
+
+**To unblock it:** allow those domains in the session environment's network settings, then rerun this item. The same change would unblock item 1, which needs:
+- NIFC: `services3.arcgis.com`;
+- MTBS: `www.mtbs.gov` and `edcintl.cr.usgs.gov`;
+- GMW: `zenodo.org` and `www.eorc.jaxa.jp`;
+- EFFIS: `maps.effis.emergency.copernicus.eu`.
+
+The EFFIS severity GeoTIFFs on `effis-gwis-cms.s3-eu-west-1.amazonaws.com` are already reachable. Alternatively, the owner can supply a polygon as `restore_site_owner.geojson`, with its `planted` year.
