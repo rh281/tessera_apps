@@ -817,3 +817,100 @@ Because no host answered, none of the other reasons the handoff lists (no 2019 t
 - EFFIS: `maps.effis.emergency.copernicus.eu`.
 
 The EFFIS severity GeoTIFFs on `effis-gwis-cms.s3-eu-west-1.amazonaws.com` are already reachable. Alternatively, the owner can supply a polygon as `restore_site_owner.geojson`, with its `planted` year.
+
+**Owner-supplied plots (2026-10-23): planted too recently.** The owner then sent two KMZ files of ARR plantation plots in India:
+
+| | Maharashtra | Tamil Nadu |
+|---|---|---|
+| Plots | 13 | 12 |
+| Total area | 6.26 ha | 5.78 ha |
+| Plot size | 0.21 to 0.73 ha | 0.08 to 0.84 ha |
+| Planted | 2025-07-08 | 2025-10-07 |
+| Under the 0.25 ha minimum | 3 | 3 |
+
+The store's last year is 2025, so every plot has at most one post-planting year, and the verdict needs at least two (three by default). Run on the largest Maharashtra plot (0.73 ha, 73 pixels, zone 43N), the app answered "insufficient years" after reading 0.24 GB in 75 s. Its 2025 change from the control was above the placebos' 95th percentile, but one year is not a trend. The smallest Tamil Nadu plot (0.08 ha) was refused by the size rule, as it should be. The plots lie up to about 70 km apart, so they cannot be merged into one site with one control ring.
+
+The files carry farmer identifiers, so neither they nor anything derived from them is committed; the run used an outline-only copy outside the repository. The run did find one wrong hint: with a single post-planting year, the verdict text suggested lowering `--min-post-years`, whose floor is 2. It now says to wait for more years (commit 3477cab, with a test).
+
+Item 2 stays open until a 2019 or 2020 planting is available.
+
+## 0.2.0, checkpoint D: the retrieval notebook (2026-10-23)
+
+**Built.** The owner's community notebook is now `notebooks/00_retrieval.ipynb`, and the README points newcomers to it before the four app notebooks. It keeps the attached notebook's 15 sections, its voice and both access paths: geotessera first, then the store directly. It has 50 cells (27 markdown, 23 code), two more than the attached notebook, both of them for the new section 5.4 pointer.
+
+**Numbers: the checkpoint answer.** The notebook was run top to bottom with nbclient in a fresh Python 3.12 venv (the lock, then the package with `--no-deps`), with every AWS_* variable unset, against snapshot `6GMNA06TNMFHHMCB9ZW0`:
+- 110 s wall time;
+- 2.69 MB saved;
+- 0 error outputs and 0 em or en dashes in cells and outputs;
+- the section 5.4 cell read 4 chunks, 32.3 MB;
+- geotessera's `read_region` returned the same values as the notebook's hand-rolled `read_bbox`;
+- the whole run raised the machine's network counter by 717 MB, an upper bound since the counter is machine-wide.
+
+### Changes from the attached notebook
+
+**Library and API fixes**
+- **The install cell's floors were wrong:** `icechunk>=1.0` cannot open this v2-format repository. They are now `icechunk>=2.2,<3`, `zarr>=3.3`, `numcodecs[pcodec]>=0.16` and `geotessera>=0.11,<0.12`.
+- **geotessera is opened with the explicit URL.** `GeoTesseraZarr()` with no argument opens the Source Coop Zarr copy, so section 1.2 now passes `store_url` and asserts both the dataset name (`1.1-dclimate`) and the URL. The name alone does not tell the two copies apart: the registry gives both of them that name.
+- **Time selection now works.** A partial string such as `"2024"` selected a one-slot slice, so the box read came back with an extra time axis. Section 6 would then have failed. A `year_label(year)` helper now selects the year exactly, then the nearest pixel.
+- **Section 11.1** reuses the checked client. Its broad `try/except` is gone, and it now checks that `read_region` and `read_bbox` agree.
+- **Section 11.2** reads the Source Coop copy from its own bucket, as geotessera does by default. It checks the endpoint first, and prints one line if the copy cannot be reached or s3fs is missing.
+- **Section 3** prints the snapshot id.
+- **Section 9 colours** are mapped by class name. Before, "built" was drawn gold and "cropland" grey.
+
+**Factual corrections**
+- **Embedding size:** the model emits 192 numbers per pixel; the store keeps 128.
+- **geotessera versions:** only 0.11 defaults to v1.1; 0.9 and 0.10 read the legacy v1 model.
+- **Costs:**
+  - a point read is about 8.1 MB on the wire (8.65 MB decoded);
+  - a 50 km window is about 400 chunks, over 3 GB a year;
+  - a 4 km window is 32 to 73 MB;
+  - a 400 x 400 window is about 80 MB at float32.
+- **Radar gap:** about a quarter of land is radar-free in 2022 to 2024, not a fifth.
+- **Northing** is always descending.
+- **Greenville** is in zone 15N, the same zone as Ames.
+- **Infill updates:** 28 zone groups now carry `updates` infill commits, with an optical floor of 1, not 15. So embeddings are fixed only within a snapshot, and caches are keyed by snapshot.
+- **geotessera's `cache_dir=`** caches only metadata and coordinate arrays on disk, and an Icechunk store ignores it.
+- **Observation counts** are on the `open_zone` Dataset, not in the read calls' results.
+- **`geotessera download`** in 0.11 writes one GeoTIFF per UTM zone.
+- **Section 8** now carries the radar-regime caveat: a pixel that switches between radar and radar-free years moves by 0.13 to 0.25 with no real change.
+- **Latency** figures are labelled as measured inside us-west-2. The notebook's own probe took about 2 s from outside the region.
+- **Section 14** has rows for the icechunk 1.x error and for the dataset and URL checks.
+
+**Section 9.** The USDA Cropland Data Layer hosts (`nassgeodata.gmu.edu`, `www.nass.usda.gov`) are blocked here, so section 9 takes the handoff's template option:
+- the label table is marked as placeholders;
+- the cross-validated accuracy and its import are removed, and no accuracy number is computed anywhere;
+- the map and the area print say they come from placeholder labels;
+- the markdown explains how to fill the table from the CDL, with a sampling sketch, and says it was not run against real CDL data.
+
+**Section 5.4.** A markdown cell after the hand-rolled `TesseraReader` names `tessera_apps.io.TesseraReader` as the one to use in applications, and says what it adds. A small code cell then opens it, plans the 5.3 box and reads the four sites, printing the bytes read.
+
+**File paths.** Section 10's GeoTIFFs and section 12.2's `app.py` are written to `notebooks/out/00_retrieval/`, which git ignores.
+
+### How it was checked
+
+**The workflow.** One agent built and ran the notebook. A reviewer re-executed a copy and got every printed value back except the timings. It then checked the API calls against geotessera 0.11.0 and the markdown against the live store and the survey. A skeptic tried to refute each of its 12 findings: 7 were confirmed and 5 partly confirmed. All 12 were fixed and the notebook re-run. The most consequential:
+- section 1.2 relied on the dataset name alone;
+- the PyPI install silently took 0.1.0, which does not read through geotessera;
+- section 3 still claimed one optical floor for every cell;
+- section 8 lacked the radar caveat.
+
+**Before committing,** the lead re-checked the saved notebook for:
+- error outputs and unexecuted cells;
+- dashes;
+- any accuracy figure;
+- local paths and credentials.
+
+### Could not be verified here
+
+- **Source Coop gateway:** `data.source.coop` is blocked. The copy itself was read through its bucket endpoint, which is what geotessera uses.
+- **CDL:** the sampling sketch was run only on a synthetic GeoTIFF.
+- **Never run here:**
+  - the section 12.2 FastAPI app (fastapi is not installed);
+  - the `/plugin` commands;
+  - the in-region latency figures.
+
+### Left for 0.2.0 (item 4)
+
+- **The install cell.** It takes `tessera_apps` from GitHub `main`, because 0.1.0 on PyPI predates the geotessera reader, and the repository is private. At release it becomes `tessera_apps>=0.2` and the notebook is re-run.
+- **Section 9's classifier cell** ends with the fitted model, so it saves scikit-learn's large HTML display. That goes in the same re-run.
+- **Bug reports.** Section 15 sends notebook bugs to `dClimate/tessera-embeddings`, where the notebook came from. The owner should decide whether they go there or to `rh281/tessera_apps`.

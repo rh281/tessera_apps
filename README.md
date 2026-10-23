@@ -4,6 +4,8 @@ Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global 
 
 **Status: checkpoint 7 of the build brief, version 0.1.0.** All four apps are built, and 0.1.0 is the first release. The hosted demo (checkpoint 8) is next. See [docs/checkpoints.md](https://github.com/rh281/tessera_apps/blob/main/docs/checkpoints.md) for the checkpoint reports and numbers.
 
+**New here? Start with [notebook 00](https://github.com/rh281/tessera_apps/blob/main/notebooks/00_retrieval.ipynb)**, which reads embeddings for a point, a box and a list of points, first through `geotessera` and then from the store directly, in about two minutes and at most about 0.7 GB read from S3. Then work through the four app notebooks: [01 wildfire](https://github.com/rh281/tessera_apps/blob/main/notebooks/01_wildfire.ipynb), [02 deforest](https://github.com/rh281/tessera_apps/blob/main/notebooks/02_deforest.ipynb), [03 wetland](https://github.com/rh281/tessera_apps/blob/main/notebooks/03_wetland.ipynb) and [04 restore](https://github.com/rh281/tessera_apps/blob/main/notebooks/04_restore.ipynb).
+
 | App | Question | Status |
 |---|---|---|
 | `wildfire` | Where did it burn, and how far has each burned pixel recovered? | built, [notebook 01](https://github.com/rh281/tessera_apps/blob/main/notebooks/01_wildfire.ipynb) |
