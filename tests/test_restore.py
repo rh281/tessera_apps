@@ -407,6 +407,11 @@ def test_the_verdict_rule_on_hand_made_trajectories():
     # Too few post-planting years: insufficient, however strong the change.
     short = _verdict([0, 0.5, 0.6, 0.7], years=[2021, 2022, 2023, 2024], p95=np.full(4, 0.01), planted=2023)
     assert short.verdict == "insufficient years" and short.since is None and "needs at least 3" in short.detail
+    assert "or lower --min-post-years" in short.detail
+    # One post-planting year: lowering --min-post-years (floor 2) cannot help, so the text does not suggest it.
+    one = _verdict([0, 0.5], years=[2024, 2025], p95=np.full(2, 0.01), planted=2025)
+    assert one.verdict == "insufficient years" and "1 post-planting year(s) (2025 to 2025)" in one.detail
+    assert "lower --min-post-years" not in one.detail and "cannot go below 2" in one.detail
     two_post = _verdict(
         [0, 0.5, 0.6, 0.7], years=[2021, 2022, 2023, 2024], p95=np.full(4, 0.01), planted=2023, min_post=2
     )

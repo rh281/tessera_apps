@@ -829,11 +829,17 @@ def call_verdict(
     sig = exceeds_band(change, p95)
     sig_years = [y for y, s, p in zip(ys, sig, post, strict=True) if s and p]
     if len(post_years) < min_post_years:
+        # --min-post-years cannot go below 2, so lowering it helps only when two or more years exist.
+        remedy = (
+            "Wait for more years in the store, or lower --min-post-years."
+            if len(post_years) >= 2
+            else "Wait for more years in the store (--min-post-years cannot go below 2)."
+        )
         return Verdict(
             VERDICT_INSUFFICIENT,
             None,
             f"{len(post_years)} post-planting year(s) ({planted} to {ys[-1]}); the verdict needs at least "
-            f"{min_post_years}. Wait for more years in the store, or lower --min-post-years.",
+            f"{min_post_years}. {remedy}",
             post_years,
             sig_years,
         )
