@@ -1530,7 +1530,12 @@ def prepared(monkeypatch, *args, **kwargs) -> dict:
     seen: dict = {}
 
     def stop(*a, **k):
-        seen.update(params=a[6], memory_estimate=k["memory_estimate"], year_reads=k["year_reads"])
+        seen.update(
+            params=a[6],
+            validation_params=k["validation_params"],
+            memory_estimate=k["memory_estimate"],
+            year_reads=k["year_reads"],
+        )
         raise _PreparedError
 
     monkeypatch.setattr(df, "prepare_run", stop)
@@ -1572,18 +1577,19 @@ def test_every_output_shaping_option_reaches_the_digest(
 
 def test_the_digest_params_cover_every_option(monkeypatch, caldor_reader, caldor_fixture, window_aoi, tmp_path):
     # Runtime switches and what the digest covers on its own (years, seed, the AOI) aside, every
-    # keyword of run_deforest is in the params; files are there by name and sha256.
+    # keyword of run_deforest is in the params, or, for the validation reference, in the validation
+    # params (its own digest); files are there by name and sha256.
     path, geometry = window_aoi
     runtime = {"aoi", "year_a", "year_b", "out_dir", "validate", "seed", "force", "max_area_km2", "max_zones"}
     runtime |= {"snapshot_id", "reader", "strict_validate"}
-    covered = {name for name, _ in DIGEST_CHANGES} | {"labels", "reference"}
-    assert set(inspect.signature(df.run_deforest).parameters) - runtime == covered
+    covered = {name for name, _ in DIGEST_CHANGES} | {"labels"}
+    assert set(inspect.signature(df.run_deforest).parameters) - runtime == covered | {"reference"}
     csv = cells_csv(tmp_path / "labels.csv", caldor_fixture, {1: ((26, 34), (0, 6)), 0: ((0, 6), (40, 48))})
     ref = write_aoi(tmp_path / "ref.geojson", geometry.buffer(-0.0001))
     params = prepared(monkeypatch, path, 2019, 2022, tmp_path / "o", reader=caldor_reader, labels=csv, reference=ref)
-    assert covered <= set(params["params"])
+    assert covered <= set(params["params"]) and "reference" not in params["params"]
     assert params["params"]["labels"] == {"file": "labels.csv", "sha256": export.file_sha256(csv)}
-    assert params["params"]["reference"] == {"file": "ref.geojson", "sha256": export.file_sha256(ref)}
+    assert params["validation_params"] == {"reference": {"file": "ref.geojson", "sha256": export.file_sha256(ref)}}
 
 
 def test_the_memory_estimate_charges_the_ring_only_for_hansen_labels(
@@ -1836,6 +1842,27 @@ def test_deforest_across_a_zone_seam(tmp_path, monkeypatch):
         assert not (conv & ~centres_in(z, PATCH.buffer(0.00015))).any(), z.zone
     assert res.summary["patches"]["count"] == 1
     assert res.summary["converted_pixels"] == sum(int((puts[3][z.zone] == 1).sum()) for z in plan.zones)
+
+
+def test_a_validation_redo_across_the_zone_seam_redraws_a_full_runs_preview(tmp_path):
+    # A plain run across 120 W, then the same with a reference: the redo reads no chunk and redraws
+    # the preview on the grid of the zone with most AOI pixels (10N), byte for byte a full run's.
+    reader, log, mem = designed_store(seam_pattern)
+    aoi = write_aoi(tmp_path / "aoi.geojson", box(LON0 - 0.0025, LAT0 - 0.0015, LON0 + 0.0015, LAT0 + 0.0015))
+    rows = [(LON0 - 0.0012 + i * 0.00026, LAT0 + 0.0018 + j * 0.0001, 1) for i in range(10) for j in range(10)]
+    rows += [(LON0 - 0.0034 + i * 0.0002, LAT0 - 0.0014 + j * 0.00015, 0) for i in range(5) for j in range(20)]
+    kw = {"labels": lonlat_csv(tmp_path / "labels.csv", rows), "block": (32, 32), "min_area_ha": 0.1}
+    ref = write_aoi(tmp_path / "ref.geojson", PATCH.buffer(0.0002))
+    plain = df.run_deforest(aoi, 2018, 2020, tmp_path / "out", reader=reader, **kw)
+    assert plain.summary["zones"] == ["10N", "11N"]
+    unoutlined = export.file_sha256(plain.paths.preview)
+    reads = len(log.chunk_keys())
+    redo = df.run_deforest(aoi, 2018, 2020, tmp_path / "out", reader=reader, validate=True, reference=ref, **kw)
+    assert redo.validation_redone and redo.validation_written and len(log.chunk_keys()) == reads
+    fresh = TesseraReader.from_store(mem)
+    full = df.run_deforest(aoi, 2018, 2020, tmp_path / "full", reader=fresh, validate=True, reference=ref, **kw)
+    assert not full.validation_redone and full.validation_written
+    assert export.file_sha256(redo.paths.preview) == export.file_sha256(full.paths.preview) != unoutlined
 
 
 def test_labels_read_across_a_seam_are_in_the_provenance(tmp_path, monkeypatch):

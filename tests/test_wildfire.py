@@ -302,37 +302,80 @@ def test_the_fallback_year_is_checked_up_front_and_explained(boundary_store, bou
     assert 2023 not in result.report["provenance"]["years"]
 
 
-def test_every_argument_is_in_the_digest(monkeypatch, tmp_path):
+def _captured_digests(monkeypatch, tmp_path, variants):
+    """The arguments digest and the validation digest ``run_wildfire`` prepares for each variant."""
     seen = []
 
     class StopRunError(Exception):
         pass
 
     def capture(app, aoi, years_read, year_a, year_b, out_dir, params, **kwargs):
-        seen.append((params, sorted(years_read)))
+        seen.append((params, sorted(years_read), kwargs["validation_params"], kwargs["validate"]))
         raise StopRunError
 
     monkeypatch.setattr(wf, "prepare_run", capture)
+    for v in variants:
+        with pytest.raises(StopRunError):
+            run_wildfire("caldor", 2020, 2022, tmp_path, **v)
+    return [
+        (
+            _common.export.run_args_digest(params, years=years, aoi_sha256="x", seed=0),
+            export.validation_args_digest(vparams),
+            validating,
+        )
+        for params, years, vparams, validating in seen
+    ]
+
+
+def test_every_argument_is_in_the_digest(monkeypatch, tmp_path):
+    # Every argument that shapes the tif, the tables, the PCA COGs or the report's other fields is
+    # in the arguments digest. The validation inputs are in the validation digest instead: adding,
+    # changing or removing one leaves the arguments digest as it was (no chunk is read again).
     ref = _two_zone_aoi(tmp_path)
     other_ref = tmp_path / "other.geojson"
     other_ref.write_text(ref.read_text().replace("{}", '{"x": 1}'))
-    variants = [
+    sev = tmp_path / "sev.tif"
+    sev.write_bytes(b"a map")
+    compute = [
         {},
         {"threshold": 0.3},
         {"min_area_ha": 2.0},
         {"fire_year": 2020},
-        {"fire_name": "Caldor"},
-        {"reference": ref},
-        {"reference": other_ref},
         {"recovery_through": 2024},
         {"recovery_sim": 0.8},
         {"block": (256, 256)},
     ]
-    for v in variants:
-        with pytest.raises(StopRunError):
-            run_wildfire("caldor", 2020, 2022, tmp_path, **v)
-    digests = {_common.export.run_args_digest(params, years=years, aoi_sha256="x", seed=0) for params, years in seen}
-    assert len(digests) == len(variants)
+    validation = [
+        {"validate": True},
+        {"validate": True, "fire_name": "Caldor"},
+        {"validate": True, "reference": ref},
+        {"validate": True, "reference": other_ref},
+        {"severity": sev},
+        {"severity": sev, "severity_min_class": 2},
+        {"validate": True, "reference": ref, "severity": sev},
+    ]
+    got = _captured_digests(monkeypatch, tmp_path, [*compute, *validation])
+    runs = [run for run, _, _ in got]
+    assert len(set(runs[: len(compute)])) == len(compute)
+    assert set(runs[len(compute) :]) == {runs[0]}
+    checks = [check for _, check, _ in got[len(compute) :]]
+    assert len(set(checks)) == len(validation)
+    # The fire name and a reference only count when the outline is asked for.
+    ignored = _captured_digests(
+        monkeypatch, tmp_path, [{"fire_name": "Caldor"}, {"reference": ref}, {"validate": True, "reference": ref}]
+    )
+    assert {run for run, _, _ in ignored} == {runs[0]}
+    assert ignored[0][1] == ignored[1][1] == got[0][1] != ignored[2][1]
+    assert [validating for _, _, validating in ignored] == [False, False, True]
+    # A reference counts by its bytes, not its name alone: the same file edited in place is another
+    # validation (the validation digest changes), and the arguments digest stays.
+    (unedited,) = _captured_digests(monkeypatch, tmp_path, [{"validate": True, "reference": ref}])
+    text = ref.read_text()
+    ref.write_text(text.replace("{}", '{"edited": true}'))
+    assert ref.read_text() != text
+    (edited,) = _captured_digests(monkeypatch, tmp_path, [{"validate": True, "reference": ref}])
+    assert unedited[0] == edited[0] == runs[0]
+    assert unedited[1] == ignored[2][1] != edited[1]
 
 
 # --------------------------------------------------------------------------------------------
@@ -747,6 +790,9 @@ def test_multi_zone_validation_is_redone_close_to_a_full_run(scar_store, scar_ru
     for key in ("tp", "fp", "fn", "tn", "n"):
         assert got["burned"][key] == pytest.approx(want["burned"][key], rel=0.01, abs=5), key
     assert got["burned"]["iou"] == pytest.approx(want["burned"]["iou"], abs=0.01)
+    # The preview is redrawn from the outputs on disk, with the outline: the full run's bytes, across zones too.
+    assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview)
+    assert redone.summary["distance_histogram"] == full.summary["distance_histogram"] is not None
 
 
 # --------------------------------------------------------------------------------------------
@@ -1094,7 +1140,8 @@ def test_severity_run_scores_each_class_on_the_fixture(
     assert head["severity_iou"] == view["iou"]
     assert head["text"].startswith("Severity (severity map): IoU")
     assert "high" in head["text"] and "increased greenness" in head["text"]
-    assert result.report["params"]["severity"]["file"] == block_severity.name
+    assert result.report["validation_params"]["severity"]["file"] == block_severity.name
+    assert "severity" not in result.report["params"] and result.report["validation_digest"] is not None
     # The caveats say what the severity scores can show, and this map is not the proxy.
     assert any("per fire" in c for c in val["caveats"]) and any("blocky" in c for c in val["caveats"])
     assert any("excluded" in c and "false positives" in c for c in val["caveats"])
@@ -1391,14 +1438,29 @@ def test_adding_validate_after_a_severity_only_run_scores_the_outline(
     assert first.validation_written and set(json.loads(first.paths.validation.read_text())["scores"]) == {"severity"}
     before = first.paths.report.read_text()
     reads = len(log.chunk_keys())
-    # The outline cannot be loaded: strict stops, and otherwise nothing is redone; the report is left as it was.
+    # The outline cannot be loaded: strict stops before anything is written; the report is left as it was.
     monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
     with pytest.raises(StrictValidationError):
         run_wildfire(aoi_path, 2020, 2022, out, validate=True, strict_validate=True, **kw)
     assert first.paths.report.read_text() == before
+    # Without strict, asking for the outline is another validation: it is redone without a chunk read and
+    # leaves what a full run with these arguments leaves, the severity scores alone with the outline not
+    # scored, and a report that does not vouch for the file.
     again = run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw)
-    assert again.skipped and not again.validation_redone and not again.validation_written
-    assert again.report == first.report and first.paths.report.read_text() == before
+    assert again.validation_redone and not again.skipped and not again.validation_written
+    assert len(log.chunk_keys()) == reads
+    again_val = json.loads(again.paths.validation.read_text())
+    assert set(again_val["scores"]) == {"severity"} and again_val["reference"]["outline"]["scored"] is False
+    assert again.report["validation_digest"] is None and "validation" not in again.report["outputs"]
+    assert "services3.arcgis.com" in again.summary["validation"]["error"]
+    assert any(w.startswith(wf.VALIDATION_SKIPPED) for w in again.report["warnings"])
+    # The same command while the outline still cannot be loaded: the report already says so.
+    still = run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw)
+    assert still.skipped and not still.validation_redone and still.report == again.report
+    # The severity map alone again: redone, vouched for, then current.
+    alone = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert alone.validation_redone and alone.validation_written and len(log.chunk_keys()) == reads
+    assert set(json.loads(alone.paths.validation.read_text())["scores"]) == {"severity"}
     assert run_wildfire(aoi_path, 2020, 2022, out, **kw).skipped
     # Reachable: adding --validate (strict too) scores the outline from the outputs on disk, without a chunk read.
     answer = [demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)]
@@ -1410,8 +1472,12 @@ def test_adding_validate_after_a_severity_only_run_scores_the_outline(
     assert {"burned", "severity"} <= set(scores)
     assert redone.summary["validation"]["source"] == "nifc" and redone.summary["validation"]["iou"] is not None
     assert "validation" in redone.report["outputs"]
-    # Current now for both requests.
+    # Current now for this request. The severity map alone is another validation: it is redone
+    # without a chunk read, and the outline leaves validation.json, as after a full run without it.
     assert run_wildfire(aoi_path, 2020, 2022, out, validate=True, **kw).skipped
+    alone = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert alone.validation_redone and alone.validation_written
+    assert set(json.loads(alone.paths.validation.read_text())["scores"]) == {"severity"}
     assert run_wildfire(aoi_path, 2020, 2022, out, **kw).skipped
     assert len(log.chunk_keys()) == reads
 
@@ -1439,17 +1505,7 @@ def test_a_partial_validation_redone_without_validate_still_scores_the_outline_l
     assert len(log.chunk_keys()) == reads
 
 
-def test_severity_enters_the_digest(monkeypatch, tmp_path):
-    seen = []
-
-    class StopRunError(Exception):
-        pass
-
-    def capture(app, aoi, years_read, year_a, year_b, out_dir, params, **kwargs):
-        seen.append((params, sorted(years_read), kwargs["validate"]))
-        raise StopRunError
-
-    monkeypatch.setattr(wf, "prepare_run", capture)
+def test_severity_enters_the_validation_digest(monkeypatch, tmp_path):
     one = tmp_path / "one.tif"
     one.write_bytes(b"one")
     two = tmp_path / "two.tif"
@@ -1468,16 +1524,20 @@ def test_severity_enters_the_digest(monkeypatch, tmp_path):
         {"severity": one, "severity_min_class": 2},
         {"severity": one, "severity_min_class": 4},
     ]
-    for v in [*variants, {"severity": copy}, {"severity_min_class": 2}, {"severity": one, "validate": True}]:
-        with pytest.raises(StopRunError):
-            run_wildfire("caldor", 2020, 2022, tmp_path, **v)
-    digests = [_common.export.run_args_digest(p, years=y, aoi_sha256="x", seed=0) for p, y, _ in seen]
+    got = _captured_digests(
+        monkeypatch,
+        tmp_path,
+        [*variants, {"severity": copy}, {"severity_min_class": 2}, {"severity": one, "validate": True}],
+    )
+    # The severity map never enters the arguments digest: adding or changing one reads nothing again.
+    assert {run for run, _, _ in got} == {got[0][0]}
+    digests = [check for _, check, _ in got]
     assert len(set(digests[: len(variants)])) == len(variants)
     # The file is digested by its name and content (a copy elsewhere is the same); the min class
-    # only counts with a map; --validate does not enter the digest.
-    assert digests[len(variants)] == digests[1] and digests[-2] == digests[0] and digests[-1] == digests[1]
+    # only counts with a map; asking for the outline too is another validation.
+    assert digests[len(variants)] == digests[1] and digests[-2] == digests[0] and digests[-1] != digests[1]
     # A severity map asks for validation.json even without --validate.
-    assert [v for _, _, v in seen] == [False, True, True, True, True, True, True, False, True]
+    assert [v for _, _, v in got] == [False, True, True, True, True, True, True, False, True]
 
 
 def _cli_args(aoi_path: Path, out: Path) -> list[str]:
@@ -1498,7 +1558,7 @@ def test_cli_wildfire_severity_options(cli_wildfire_reader, fixture_aoi, block_s
     assert "moderate or worse (the stop rule's): IoU" in flat
     assert "4 high" in text and "5 increased greenness" in text and "0 background" in text
     report = json.loads((out / "wildfire_report.json").read_text())
-    assert report["params"]["severity"] == {
+    assert report["validation_params"]["severity"] == {
         "file": block_severity.name,
         "sha256": export.file_sha256(block_severity),
         "min_class": 4,
@@ -1681,3 +1741,274 @@ def test_the_proxy_cog_bytes_depend_only_on_what_it_is_made_from(
     got = codes[z.zone][z.mask]
     assert info["proxy"] is True and info["nodata"] == s.NODATA
     assert (got == UNMAPPED).any() and not (got == 0).any()
+
+
+# --------------------------------------------------------------------------------------------
+# The validation digest: validation inputs added, changed or removed read no chunk
+# --------------------------------------------------------------------------------------------
+
+
+def _outline_file(path: Path, geometry) -> Path:
+    path.write_text(json.dumps({"type": "Feature", "properties": {}, "geometry": mapping(geometry)}))
+    return path
+
+
+def _made(result) -> dict[str, str]:
+    """The sha256 of every output a validation redo must leave alone: the tif, the tables, the PCA COGs."""
+    paths = result.paths
+    return {p.name: export.file_sha256(p) for p in (paths.tif, paths.summary_parquet, paths.summary_csv)} | {
+        p.name: export.file_sha256(p) for p in result.extra_paths.values()
+    }
+
+
+@pytest.fixture
+def two_outlines(fixture_aoi, tmp_path) -> tuple[Path, Path]:
+    """Two outline references over the fixture window: the Hansen 2021 loss outline, and it shrunk by about 20 m."""
+    _, aoi = fixture_aoi
+    outline = demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)
+    return _outline_file(tmp_path / "a.geojson", outline), _outline_file(
+        tmp_path / "b.geojson", outline.buffer(-0.0002)
+    )
+
+
+def test_validation_inputs_added_changed_and_removed_read_no_chunk(
+    caldor_reader, caldor_store, fixture_aoi, block_severity, two_outlines, tmp_path
+):
+    mem, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, ref_b = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader}
+    plain = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert not plain.validation_written and log.chunk_keys()
+    reads = len(log.chunk_keys())
+    made = _made(plain)
+    steps = [
+        {"validate": True, "reference": ref_a},  # added
+        {"validate": True, "reference": ref_b},  # changed
+        {"validate": True, "reference": ref_b, "severity": block_severity},  # added
+        {"validate": True, "reference": ref_b, "severity": block_severity, "severity_min_class": 2},  # changed
+        {"validate": True, "reference": ref_b},  # the severity map removed
+        {"severity": block_severity},  # the outline removed
+    ]
+    last = plain.report["validation_digest"]
+    assert last is None
+    for i, extra in enumerate(steps):
+        redone = run_wildfire(aoi_path, 2020, 2022, out, **kw, **extra)
+        assert redone.validation_redone and redone.validation_written and not redone.skipped, extra
+        assert len(log.chunk_keys()) == reads, extra
+        report = json.loads(redone.paths.report.read_text())
+        assert report["validation_redone"]["bytes_read"] == 0 and report["args_digest"] == plain.report["args_digest"]
+        assert report["validation_digest"] not in (None, last) and "validation" in report["outputs"]
+        last = report["validation_digest"]
+        assert _made(redone) == made, extra
+        # What a full run with these arguments writes (one zone: the same scores, the same preview bytes).
+        fresh = TesseraReader.from_store(KeyLog(mem))
+        full = run_wildfire(aoi_path, 2020, 2022, tmp_path / f"full{i}", **{**kw, "reader": fresh}, **extra)
+        assert _made(full) == made
+        assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview), extra
+        got = json.loads(redone.paths.validation.read_text())
+        want = json.loads(full.paths.validation.read_text())
+        assert got["scores"] == want["scores"], extra
+        assert redone.summary["validation"] == full.summary["validation"]
+        assert redone.summary["headline"] == full.summary["headline"]
+        assert report["validation_params"] == full.report["validation_params"]
+        assert report["validation_digest"] == full.report["validation_digest"]
+        # The same arguments again: current.
+        assert run_wildfire(aoi_path, 2020, 2022, out, **kw, **extra).skipped
+    # The outline on the preview: drawn with a reference, gone without one.
+    assert export.file_sha256(redone.paths.preview) != export.file_sha256(tmp_path / "full0" / "wildfire_preview.png")
+    assert len(log.chunk_keys()) == reads
+
+
+def test_a_compute_input_change_reruns_in_full(caldor_reader, caldor_store, fixture_aoi, two_outlines, tmp_path):
+    _, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, ref_b = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader, "validate": True, "reference": ref_a}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    reads = len(log.chunk_keys())
+    for change in ({"min_area_ha": 0.2}, {"threshold": 0.4}, {"min_area_ha": 0.3, "reference": ref_b}):
+        again = run_wildfire(aoi_path, 2020, 2022, out, **{**kw, **change})
+        assert not again.skipped and not again.validation_redone, change
+        assert len(log.chunk_keys()) > reads, change
+        assert again.report["args_digest"] != first.report["args_digest"]
+        reads = len(log.chunk_keys())
+
+
+def test_a_validating_rerun_of_a_report_without_a_validation_digest_reruns_in_full(
+    caldor_reader, caldor_store, fixture_aoi, two_outlines, tmp_path
+):
+    # A report written before the validation digest existed cannot say what its validation.json
+    # was scored against: a validating rerun is a full run, never a validation-only redo.
+    _, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, _ = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader, "validate": True, "reference": ref_a}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert first.validation_written
+    old = json.loads(first.paths.report.read_text())
+    del old["validation_digest"], old["validation_params"]
+    export.write_json(first.paths.report, old)
+    reads = len(log.chunk_keys())
+    # Without validation the other outputs are still current.
+    assert run_wildfire(aoi_path, 2020, 2022, out, **SEVERITY_KW, reader=caldor_reader).skipped
+    assert len(log.chunk_keys()) == reads
+    again = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert not again.skipped and not again.validation_redone and again.validation_written
+    assert len(log.chunk_keys()) > reads
+    assert again.report["validation_digest"] == first.report["validation_digest"]
+    # The same holds for an old report whose validation could not be loaded: a full run.
+    old = json.loads(again.paths.report.read_text())
+    old["outputs"].pop("validation")
+    del old["validation_digest"], old["validation_params"]
+    export.write_json(again.paths.report, old)
+    reads = len(log.chunk_keys())
+    third = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert not third.validation_redone and len(log.chunk_keys()) > reads
+
+
+def test_turning_validation_off_keeps_the_vouched_validation_under_its_own_digest(
+    caldor_reader, caldor_store, fixture_aoi, block_severity, two_outlines, tmp_path
+):
+    _, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, ref_b = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader}
+    validating = {"validate": True, "reference": ref_a, "severity": block_severity}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw, **validating)
+    reads = len(log.chunk_keys())
+    scored = export.file_sha256(first.paths.validation)
+    # No validation asked for: the outputs are current, so the run skips, as before; the report still
+    # vouches for the validation file, which is the one its validation digest names.
+    off = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert off.skipped and not off.validation_redone and off.validation_written
+    assert len(log.chunk_keys()) == reads
+    assert off.report == first.report and export.file_sha256(off.paths.validation) == scored
+    assert off.report["outputs"]["validation"] == scored
+    assert off.report["validation_digest"] == export.validation_args_digest(off.report["validation_params"])
+    # So the same validation inputs skip, and other ones redo the validation, still without a chunk read.
+    assert run_wildfire(aoi_path, 2020, 2022, out, **kw, **validating).skipped
+    other = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True, reference=ref_b)
+    assert other.validation_redone and len(log.chunk_keys()) == reads
+    assert export.file_sha256(other.paths.validation) != scored
+    # Validation off and a compute input changed: a full run, and the earlier validation file goes.
+    changed = run_wildfire(aoi_path, 2020, 2022, out, **{**kw, "min_area_ha": 0.2})
+    assert not changed.skipped and not changed.validation_written and len(log.chunk_keys()) > reads
+    assert not changed.paths.validation.exists() and "validation" not in changed.report["outputs"]
+    assert changed.report["validation_digest"] is None and changed.report["validation_params"] is None
+
+
+def test_a_redo_whose_outline_cannot_load_scores_a_changed_severity_map(
+    caldor_reader, caldor_store, caldor_fixture, fixture_aoi, block_severity, two_outlines, tmp_path, monkeypatch
+):
+    # The outline cannot be loaded, but the severity map changed: its scores are redone (the report
+    # does not vouch for the file, which lacks the outline), and the earlier outline leaves the preview.
+    mem, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, _ = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True, reference=ref_a, severity=block_severity)
+    reads = len(log.chunk_keys())
+    outlined = export.file_sha256(first.paths.preview)
+    transform, n, epsg = _fixture_grid(caldor_fixture)
+    other = _write_raster(tmp_path / "other_dnbr6.tif", np.full((n, n), 4, dtype=np.uint8), transform, epsg)
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    # The same severity map and an outline (NIFC, not ref_a) that cannot load: another validation, so it
+    # is redone, and the earlier outline's scores do not stay. It leaves what a full run with these
+    # arguments leaves: the severity scores alone, the outline not scored, no outline on the preview.
+    asked = {"validate": True, "severity": block_severity}
+    same = run_wildfire(aoi_path, 2020, 2022, out, **kw, **asked)
+    assert same.validation_redone and not same.skipped and not same.validation_written
+    assert len(log.chunk_keys()) == reads
+    same_val = json.loads(same.paths.validation.read_text())
+    assert set(same_val["scores"]) == {"severity"} and same_val["reference"]["outline"]["scored"] is False
+    assert same.report["validation_digest"] is None and "validation" not in same.report["outputs"]
+    assert "services3.arcgis.com" in same.summary["validation"]["error"]
+    full = run_wildfire(
+        aoi_path, 2020, 2022, tmp_path / "full", **{**kw, "reader": TesseraReader.from_store(KeyLog(mem))}, **asked
+    )
+    assert export.file_sha256(same.paths.preview) == export.file_sha256(full.paths.preview) != outlined
+    assert same_val["scores"] == json.loads(full.paths.validation.read_text())["scores"]
+    assert same.summary["validation"] == full.summary["validation"]
+    # The same command again, the outline still failing: the report already says so; nothing is redone.
+    assert run_wildfire(aoi_path, 2020, 2022, out, **kw, **asked).skipped
+    redone = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True, severity=other)
+    assert redone.validation_redone and not redone.validation_written and len(log.chunk_keys()) == reads
+    val = json.loads(redone.paths.validation.read_text())
+    assert set(val["scores"]) == {"severity"} and val["reference"]["outline"]["scored"] is False
+    assert val["reference"]["severity"]["file"] == "other_dnbr6.tif"
+    assert redone.report["validation_digest"] is None and "validation" not in redone.report["outputs"]
+    assert export.file_sha256(redone.paths.preview) != outlined
+
+
+def test_a_redo_whose_other_outline_cannot_load_withdraws_the_earlier_validation(
+    caldor_reader, caldor_store, fixture_aoi, two_outlines, tmp_path, monkeypatch
+):
+    # A validation vouched for against one outline, then a rerun asking for NIFC, which cannot be
+    # reached: the redo must not keep vouching for the earlier outline's scores. It reads no chunk
+    # and leaves what a full run with these arguments leaves: no validation file, the error and the
+    # skipped warning in the report, and a preview without an outline.
+    mem, log = caldor_store
+    aoi_path, _ = fixture_aoi
+    ref_a, _ = two_outlines
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader}
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True, reference=ref_a)
+    assert first.validation_written
+    reads = len(log.chunk_keys())
+    made = _made(first)
+    outlined = export.file_sha256(first.paths.preview)
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    redone = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True)
+    assert redone.validation_redone and not redone.skipped and not redone.validation_written
+    assert len(log.chunk_keys()) == reads and redone.report["validation_redone"]["bytes_read"] == 0
+    assert _made(redone) == made
+    assert not redone.paths.validation.exists() and "validation" not in redone.report["outputs"]
+    assert redone.report["validation_digest"] is None
+    assert "services3.arcgis.com" in redone.summary["validation"]["error"]
+    assert any(w.startswith(wf.VALIDATION_SKIPPED) for w in redone.report["warnings"])
+    fresh = TesseraReader.from_store(KeyLog(mem))
+    full = run_wildfire(aoi_path, 2020, 2022, tmp_path / "full", **{**kw, "reader": fresh}, validate=True)
+    assert not full.paths.validation.exists()
+    # The preview is a full run's, without the earlier outline.
+    assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview)
+    assert export.file_sha256(redone.paths.preview) != outlined
+    assert redone.summary["validation"] == full.summary["validation"]
+    assert redone.summary["headline"] == full.summary["headline"]
+    assert redone.report["validation_params"] == full.report["validation_params"]
+    assert sorted(redone.report["warnings"]) == sorted(full.report["warnings"])
+    # The same command while NIFC still cannot be reached: the report already says so; nothing is redone.
+    again = run_wildfire(aoi_path, 2020, 2022, out, **kw, validate=True)
+    assert again.skipped and not again.validation_redone and again.report == redone.report
+    assert len(log.chunk_keys()) == reads
+
+
+def test_a_vouched_validation_file_gone_while_its_outline_cannot_load_is_withdrawn(
+    caldor_reader, caldor_store, fixture_aoi, tmp_path, monkeypatch
+):
+    # The same validation inputs, but the validation file the report vouches for is gone and NIFC
+    # cannot be reached now: the report must stop vouching for it. The redo reads no chunk and
+    # records why the validation was not done; the same command again then skips.
+    _, log = caldor_store
+    aoi_path, aoi = fixture_aoi
+    out = tmp_path / "out"
+    kw = {**SEVERITY_KW, "reader": caldor_reader, "validate": True}
+    answer = [demo_feature("caldor", "hansen_2021_loss_outline").intersection(aoi)]
+    monkeypatch.setattr(validate, "nifc_perimeters", lambda bbox, **k: list(answer))
+    first = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert first.validation_written and first.report["validation_digest"] is not None
+    reads = len(log.chunk_keys())
+    first.paths.validation.unlink()
+    monkeypatch.setattr(validate, "nifc_perimeters", _unreachable)
+    redone = run_wildfire(aoi_path, 2020, 2022, out, **kw)
+    assert redone.validation_redone and not redone.skipped and not redone.validation_written
+    assert len(log.chunk_keys()) == reads
+    assert "validation" not in redone.report["outputs"] and redone.report["validation_digest"] is None
+    assert redone.report["validation_params"] == first.report["validation_params"]
+    assert "services3.arcgis.com" in redone.summary["validation"]["error"]
+    assert run_wildfire(aoi_path, 2020, 2022, out, **kw).skipped

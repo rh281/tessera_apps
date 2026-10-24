@@ -11,19 +11,19 @@ On a push of a tag `vX.Y.Z`:
 1. **`ci`** runs the whole of `ci.yml` (lockfile, ruff, mypy, offline tests) on Python 3.12 and 3.13.
 2. **`build`** warns when the repository is private (step 0 of the one-time setup), and checks that the tag is `v` plus `__version__`, stopping with both values if not. It takes the release notes from the `## X.Y.Z (date)` section of `CHANGELOG.md` and stops if there is none. Then it runs `uv build`, `scripts/check_dist.py` (what the wheel and the sdist must and must not hold, and their metadata) and `twine check --strict`. Last, a smoke test: a fresh Python 3.12 venv, `pip install` of the wheel with its dependencies resolved from PyPI as a user would get them, `tessera-apps --version` and `--help`, and the offline test suite run against the installed wheel.
 3. **`publish`** uploads the build to PyPI, in the GitHub environment `pypi`.
-4. **`github-release`** creates the GitHub release for the tag, with the wheel and the sdist attached and the changelog section as its notes.
+4. **`github-release`** attaches the wheel and the sdist to the GitHub release for the tag. When the tag came from a release made in GitHub's web UI, as for 0.1.0, that release already exists: the job uploads the two files to it and keeps its text. Otherwise it creates the release, with the changelog section as its notes.
 
 Nothing is published unless every earlier job passed. The workflow can also be run by hand from the Actions tab (`workflow_dispatch`): that is a dry run of steps 1 and 2, which publishes nothing unless the **testpypi** box is ticked, and then only to TestPyPI. Two runs for the same tag never overlap: the second waits.
 
 ## One-time setup
 
-These steps need an owner of the PyPI account and an admin of the GitHub repository. Until they are done, the `publish` job fails and nothing is uploaded.
+These steps need an owner of the PyPI account and an admin of the GitHub repository. Until they are done, the `publish` job fails and nothing is uploaded. Steps 0 to 2 were done for 0.1.0 (2026-10-21): the repository stays private by the owner's choice, the publisher became a normal one on the `tessera-apps` project when 0.1.0 was published, and the publish ran in the `pypi` environment. A later release needs none of them again unless the workflow file, the environment or the repository is renamed.
 
-0. **Public or private: the owner's choice.** The repository is private, by decision. The README is the PyPI page and links to this repository about twenty times, and the package's Homepage, Source, Issues and Changelog links point here, as do the README's "from source" and reproducible install routes. While the repository is private, all of those give a 404 to anyone without access, and PyPI keeps each release's page as it was uploaded. The package itself installs and runs from PyPI either way. To make it public later: *Settings*, *General*, *Danger Zone*, *Change visibility*; a later release then carries working links. The `build` job checks this on every run and warns when the repository cannot be opened without signing in, but it does not stop the release.
+0. **Public or private: the owner's choice.** The repository is private, by decision. The README is the PyPI page and links to this repository nearly thirty times, and the package's Homepage, Source, Issues and Changelog links point here, as do the README's "from source" and reproducible install routes. While the repository is private, all of those give a 404 to anyone without access, and PyPI keeps each release's page as it was uploaded. The package itself installs and runs from PyPI either way. To make it public later: *Settings*, *General*, *Danger Zone*, *Change visibility*; a later release then carries working links. The `build` job checks this on every run and warns when the repository cannot be opened without signing in, but it does not stop the release.
 1. **PyPI pending trusted publisher.** Sign in at <https://pypi.org>, open *Your account*, *Publishing*, and add a pending publisher of type GitHub with:
    - PyPI project name: `tessera-apps`
    - Owner: `rh281`
-   - Repository name: `tessera_apps`
+   - Repository name: `tessera_apps`, with an underscore, although the PyPI project has a hyphen. For 0.1.0 the pending publisher said `tessera-apps`, and the first upload failed with `invalid-publisher`.
    - Workflow name: `release.yml`
    - Environment name: `pypi`
 
@@ -58,7 +58,7 @@ These steps need an owner of the PyPI account and an admin of the GitHub reposit
    git push origin vX.Y.Z
    ```
 
-   Or from the web: *Releases*, *Draft a new release*, type `vX.Y.Z` under *Choose a tag* and pick *Create new tag on publish* with target `main`, give it a title, and *Publish release*. The new tag starts the same run, which attaches the sdist and the wheel to that release and keeps the text you wrote. (A Claude Code session cannot push tags: its git proxy refuses them, so the owner does this step.)
+   Or from the web, as the owner did for 0.1.0: *Releases*, *Draft a new release*, type `vX.Y.Z` under *Choose a tag* and pick *Create new tag on publish* with target `main`, give it a title (`tessera_apps X.Y.Z`), paste the `## X.Y.Z` section of `CHANGELOG.md` (without its heading) as the description, and *Publish release*. The new tag starts the same run, which attaches the sdist and the wheel to that release and keeps the text you wrote, so the changelog notes reach the release only if you paste them. (A Claude Code session cannot push tags: its git proxy refuses them, so the owner does this step.)
 
 7. **Watch the run** in the Actions tab, and approve the `pypi` deployment if the environment has reviewers.
 8. **Check the release** from a clean venv, with no AWS credentials set:
@@ -70,11 +70,11 @@ These steps need an owner of the PyPI account and an admin of the GitHub reposit
    /tmp/tessera-check/bin/tessera-apps info
    ```
 
-   `--version` prints `tessera-apps X.Y.Z`, and `info` prints the store's snapshot and the published years of zone 10N. Check that the GitHub release has the notes and both files, and that the PyPI page renders the README.
+   `--version` prints `tessera-apps X.Y.Z`, and `info` prints the store's snapshot, `"dataset": "1.1-dclimate"` and the published years of zone 10N. Check that the GitHub release has the notes and both files, and that the PyPI page renders the README.
 
 ## When something fails
 
-- **Before `publish`** (a private repository, a wrong tag, a missing changelog section, a failing check or test): nothing reached PyPI. Delete the tag (`git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`), fix the problem on `main`, and tag again.
-- **In `publish`** (most often the trusted publisher or the environment name does not match): fix the setup on PyPI or GitHub, then use *Re-run failed jobs* on the same run, which uploads the same build. If PyPI already accepted any file for the version, do not move the tag to other code: release X.Y.Z+1.
-- **In `github-release`, after PyPI accepted the upload:** re-run the job, or create the release by hand from the run's `dist` artifact with `gh release create vX.Y.Z dist/* --notes-file notes.md`.
+- **Before `publish`** (a wrong tag, a missing changelog section, a failing check or test; a private repository only warns): nothing reached PyPI. Delete the tag (`git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`), fix the problem on `main`, and tag again. If the tag came from a release made in the web UI, delete that release too (*Releases*, the release, *Delete*); deleting a release leaves its tag, so delete the tag as well (*Tags*, the tag, *Delete*), then publish a new release from the fixed `main`.
+- **In `publish`** (most often the trusted publisher or the environment name does not match, which PyPI reports as `invalid-publisher`): fix the setup on PyPI or GitHub, then use *Re-run failed jobs* on the same run, which uploads the same build. That is how 0.1.0 was published, after its publisher's repository name was corrected to `tessera_apps`; the re-run also attached the files to the release. If PyPI already accepted any file for the version, do not move the tag to other code: release X.Y.Z+1.
+- **In `github-release`, after PyPI accepted the upload:** re-run the job, or attach the files by hand from the run's `dist` artifact: `gh release upload vX.Y.Z dist/*` when the release exists (one made in the web UI), otherwise `gh release create vX.Y.Z dist/* --notes-file notes.md`.
 - **A bad release on PyPI:** yank it (on PyPI, *Manage*, the release, *Options*, *Yank*) so `pip` stops choosing it, and publish a fixed X.Y.Z+1. Deleting it would not free the number.

@@ -46,7 +46,7 @@ from tessera_apps.io import (
     read_points,
 )
 
-from .conftest import BOUNDARY, PlainCliRunner, fixture_window_lonlat, write_hansen_tiles
+from .conftest import BOUNDARY, KeyLog, PlainCliRunner, fixture_window_lonlat, write_hansen_tiles
 
 RECOVERY_FIELDS = (
     "median_sim_burned",
@@ -626,9 +626,50 @@ def test_cli_wildfire_redone_validation_message(cli_reader, caldor_aoi, fake_nif
     args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
     args += ["--min-area-ha", "0.05"]
     assert PlainCliRunner().invoke(app, args).exit_code == 0
+    # The fixture run reads well under 5 MB, which prints as 0.00 GB like the redo's nothing; recorded as
+    # 2 GB (the report's own hash is not checked, so the outputs stay current), the two costs differ.
+    report_path = out / "wildfire_report.json"
+    report = json.loads(report_path.read_text())
+    report["bytes_read"] = 2_000_000_000
+    export.write_json(report_path, report)
     result = PlainCliRunner().invoke(app, [*args, "--validate", "--strict-validate"])
     assert result.exit_code == 0, result.output
     assert "validation was redone" in result.stdout and "IoU" in result.stdout
+    # The cost printed is the earlier run's, named as such, and the redo's own, which read nothing.
+    text = " ".join(result.stdout.split())
+    assert "The run that wrote these outputs read 2.00 GB of chunks" in text
+    assert "The validation redo read 0.00 GB of chunks" in text
+    assert "\nRead " not in result.stdout
+
+
+def test_cli_wildfire_a_redo_whose_other_reference_cannot_load_is_not_called_current(
+    cli_reader, caldor_aoi, hansen_reference, tmp_path, monkeypatch
+):
+    aoi_path, _ = caldor_aoi
+    out = tmp_path / "out"
+    args = ["wildfire", "--aoi", str(aoi_path), "--year-a", "2020", "--year-b", "2022", "--out", str(out)]
+    args += ["--min-area-ha", "0.05", "--validate"]
+    first = PlainCliRunner().invoke(app, [*args, "--reference", str(hansen_reference)])
+    assert first.exit_code == 0, first.output
+    assert "Validation (file)" in first.stdout
+
+    def refused(*args, **kwargs):
+        raise validate.ReferenceUnavailableError("services3.arcgis.com refused the request (403)")
+
+    monkeypatch.setattr(validate, "nifc_perimeters", refused)
+    # NIFC instead of the file, and NIFC cannot be reached: the validation is redone and not done, and
+    # the command neither calls the outputs current as they were nor prints the file's scores.
+    result = PlainCliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    text = " ".join(result.stdout.split())
+    assert "pass --force to rerun" not in text and "validation was redone" in text
+    assert "Validation (file)" not in text and "Validation: not done (services3.arcgis.com" in text
+    assert not (out / "wildfire_validation.json").exists()
+    # The same command again: now the outputs are current, and still say the validation was not done.
+    again = PlainCliRunner().invoke(app, args)
+    assert again.exit_code == 0, again.output
+    text = " ".join(again.stdout.split())
+    assert "pass --force to rerun" in text and "Validation: not done (services3.arcgis.com" in text
 
 
 def test_cli_wildfire_store_errors_exit_2_with_notes(monkeypatch, boundary_reader, tmp_path):
@@ -1147,6 +1188,137 @@ def test_deforest_validation_is_redone_from_the_outputs_without_reading(
     assert run_deforest(aoi_path, 2019, 2022, out, **kw).skipped
 
 
+def _deforest_made(result) -> dict[str, str]:
+    """The sha256 of every output a validation redo must leave alone: the tif, the tables, the labels."""
+    paths = result.paths
+    files = (paths.tif, paths.summary_parquet, paths.summary_csv, *result.extra_paths.values())
+    return {p.name: export.file_sha256(p) for p in files}
+
+
+@pytest.fixture
+def deforest_references(deforest_aoi, tmp_path) -> tuple[Path, Path]:
+    """Two conversion references over the deforest window: two discs around its centre."""
+    _, aoi = deforest_aoi
+    centre = aoi.centroid
+    return (
+        _feature_collection(tmp_path / "loss_a.geojson", centre.buffer(0.0008), {}),
+        _feature_collection(tmp_path / "loss_b.geojson", centre.buffer(0.0012), {}),
+    )
+
+
+def test_deforest_validation_inputs_added_changed_and_removed_read_no_chunk(
+    caldor_reader, caldor_store, deforest_aoi, deforest_hansen, deforest_references, tmp_path
+):
+    mem, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    ref_a, ref_b = deforest_references
+    out = tmp_path / "out"
+    kw = {**DEFOREST_KW, "reader": caldor_reader, "hansen_url_template": deforest_hansen}
+    plain = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    assert not plain.validation_written and log.chunk_keys()
+    reads = len(log.chunk_keys())
+    made = _deforest_made(plain)
+    unoutlined = export.file_sha256(plain.paths.preview)
+    steps = [
+        {"validate": True},  # added: Hansen
+        {"validate": True, "reference": ref_a},  # changed: a reference file instead
+        {"validate": True, "reference": ref_b},  # changed: another file
+        {"validate": True},  # the reference file removed: Hansen again
+    ]
+    last = plain.report["validation_digest"]
+    for i, extra in enumerate(steps):
+        redone = run_deforest(aoi_path, 2019, 2022, out, **kw, **extra)
+        assert redone.validation_redone and redone.validation_written and not redone.skipped, extra
+        assert len(log.chunk_keys()) == reads, extra
+        report = json.loads(redone.paths.report.read_text())
+        assert report["validation_redone"]["bytes_read"] == 0 and report["args_digest"] == plain.report["args_digest"]
+        assert report["validation_digest"] not in (None, last)
+        last = report["validation_digest"]
+        assert _deforest_made(redone) == made, extra
+        fresh = TesseraReader.from_store(KeyLog(mem))
+        full = run_deforest(aoi_path, 2019, 2022, tmp_path / f"full{i}", **{**kw, "reader": fresh}, **extra)
+        assert _deforest_made(full) == made
+        # One zone: the same scores and report fields as a full run, and the preview byte for byte.
+        assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview), extra
+        got = json.loads(redone.paths.validation.read_text())
+        assert got["scores"] == json.loads(full.paths.validation.read_text())["scores"], extra
+        for key in ("validation", "cross_check", "hansen"):
+            assert redone.summary[key] == full.summary[key], (key, extra)
+        assert report["validation_digest"] == full.report["validation_digest"]
+        assert run_deforest(aoi_path, 2019, 2022, out, **kw, **extra).skipped
+    # Turned off: the outputs are current, so the run skips; the report vouches for its last validation.
+    off = run_deforest(aoi_path, 2019, 2022, out, **kw)
+    assert off.skipped and off.validation_written and off.report["validation_digest"] == last
+    assert len(log.chunk_keys()) == reads
+    # The preview kept is the validated one, with the loss outline the plain run did not draw.
+    assert export.file_sha256(off.paths.preview) != unoutlined
+
+
+def test_deforest_a_redo_whose_other_reference_cannot_load_withdraws_the_earlier_validation(
+    caldor_reader, caldor_store, deforest_aoi, deforest_hansen, deforest_references, tmp_path, monkeypatch
+):
+    # A validation vouched for against a reference file, then a rerun asking for Hansen, which cannot
+    # be reached: the redo reads no chunk and leaves what a full run with these arguments leaves, not
+    # the earlier file's scores.
+    mem, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    ref_a, _ = deforest_references
+    out = tmp_path / "out"
+    kw = {**DEFOREST_KW, "reader": caldor_reader, "hansen_url_template": deforest_hansen}
+    first = run_deforest(aoi_path, 2019, 2022, out, **kw, validate=True, reference=ref_a)
+    assert first.validation_written
+    reads = len(log.chunk_keys())
+    made = _deforest_made(first)
+    outlined = export.file_sha256(first.paths.preview)
+    monkeypatch.setattr(validate, "hansen_loss", _unreachable_hansen)
+    redone = run_deforest(aoi_path, 2019, 2022, out, **kw, validate=True)
+    assert redone.validation_redone and not redone.skipped and not redone.validation_written
+    assert len(log.chunk_keys()) == reads and redone.report["validation_redone"]["bytes_read"] == 0
+    assert _deforest_made(redone) == made
+    assert not redone.paths.validation.exists() and "validation" not in redone.report["outputs"]
+    assert redone.report["validation_digest"] is None
+    assert "storage.googleapis.com" in redone.summary["validation"]["error"]
+    assert any(w.startswith(dfr.VALIDATION_SKIPPED) for w in redone.report["warnings"])
+    fresh = TesseraReader.from_store(KeyLog(mem))
+    full = run_deforest(aoi_path, 2019, 2022, tmp_path / "full", **{**kw, "reader": fresh}, validate=True)
+    assert not full.paths.validation.exists()
+    assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview) != outlined
+    for key in ("validation", "cross_check", "hansen"):
+        assert redone.summary[key] == full.summary[key], key
+    assert redone.report["validation_params"] == full.report["validation_params"]
+    assert sorted(redone.report["warnings"]) == sorted(full.report["warnings"])
+    # The same command while Hansen still cannot be reached: the report already says so; nothing is redone.
+    again = run_deforest(aoi_path, 2019, 2022, out, **kw, validate=True)
+    assert again.skipped and not again.validation_redone and again.report == redone.report
+    assert len(log.chunk_keys()) == reads
+
+
+def test_deforest_compute_change_and_old_report_rerun_in_full(
+    caldor_reader, caldor_store, deforest_aoi, deforest_hansen, deforest_references, tmp_path
+):
+    _, log = caldor_store
+    aoi_path, _ = deforest_aoi
+    ref_a, _ = deforest_references
+    out = tmp_path / "out"
+    kw = {**DEFOREST_KW, "reader": caldor_reader, "hansen_url_template": deforest_hansen, "validate": True}
+    first = run_deforest(aoi_path, 2019, 2022, out, **kw, reference=ref_a)
+    assert first.validation_written
+    reads = len(log.chunk_keys())
+    # A compute input: a full run.
+    changed = run_deforest(aoi_path, 2019, 2022, out, **{**kw, "forest_prob": 0.6}, reference=ref_a)
+    assert not changed.skipped and not changed.validation_redone and len(log.chunk_keys()) > reads
+    # A report without a validation digest (written before it existed): a validating rerun is a full run.
+    old = json.loads(changed.paths.report.read_text())
+    del old["validation_digest"], old["validation_params"]
+    export.write_json(changed.paths.report, old)
+    reads = len(log.chunk_keys())
+    assert run_deforest(aoi_path, 2019, 2022, out, **{**kw, "validate": False, "forest_prob": 0.6}).skipped
+    assert len(log.chunk_keys()) == reads
+    again = run_deforest(aoi_path, 2019, 2022, out, **{**kw, "forest_prob": 0.6}, reference=ref_a)
+    assert not again.skipped and not again.validation_redone and len(log.chunk_keys()) > reads
+    assert again.report["validation_digest"] == changed.report["validation_digest"]
+
+
 def test_cli_deforest_runs_skips_and_validates(cli_reader, deforest_aoi, deforest_hansen, tmp_path, monkeypatch):
     monkeypatch.setattr(validate, "HANSEN_URL_TEMPLATE", deforest_hansen)
     aoi_path, _ = deforest_aoi
@@ -1576,7 +1748,8 @@ def test_wetland_end_to_end_on_the_caldor_fixture(
     )
     assert report["estimated_memory"] == wl.memory_estimate(plan, block=(32, 32), coast_km=0.1)
     assert set(report["timings"]) >= {"regime_probe", "seeds_read", "reference", "stream", "clean", "coastal", "write"}
-    assert report["params"]["worldcover_url_template"] == template and report["params"]["score"] == "cosine"
+    assert report["validation_params"]["worldcover_url_template"] == template and report["params"]["score"] == "cosine"
+    assert "worldcover_url_template" not in report["params"] and report["validation_digest"] is not None
     assert s["radar"]["seed_regime"] == "radar" and s["radar"]["regime_mismatch_pixels"] == 0
     assert s["storm_note"] is None and not report["warnings"]
 
@@ -1619,7 +1792,7 @@ def test_cli_wetland_runs_skips_and_validates(cli_reader, wetland_inputs, tmp_pa
     ):
         assert text in first.stdout, text
     report = json.loads((out / "wetland_report.json").read_text())
-    assert report["params"]["worldcover_url_template"] == template
+    assert report["validation_params"]["worldcover_url_template"] == template
     assert (out / "wetland_validation.json").is_file() and (out / "wetland_seeds.parquet").is_file()
     second = runner.invoke(app, args)
     assert second.exit_code == 0, second.output

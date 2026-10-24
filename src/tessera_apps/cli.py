@@ -118,6 +118,22 @@ def _fmt(value: Any, spec: str = ".3f") -> str:  # noqa: ANN401
     return format(value, spec)
 
 
+def _print_cost(
+    console: Console, report: Mapping[str, Any], cost: str, *, skipped: bool, validation_redone: bool
+) -> None:
+    """The chunk bytes and wall time: of this run, or of the run that wrote the outputs and of the redo."""
+    if not (skipped or validation_redone):
+        console.print(f"Read {cost}")
+        return
+    console.print(f"The run that wrote these outputs read {cost}")
+    redo = report.get("validation_redone")
+    if validation_redone and isinstance(redo, Mapping):
+        console.print(
+            f"The validation redo read {_fmt((redo.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in "
+            f"{_fmt(redo.get('wall_s'), '.1f')} s"
+        )
+
+
 def _print_severity(console: Console, sev: Mapping[str, Any]) -> None:
     """The severity scores of a wildfire run: per-class detection, then the binary scores.
 
@@ -240,7 +256,7 @@ def _print_wildfire(report: Mapping[str, Any], *, skipped: bool, out: Path, vali
         console.print(f"Validation: not done ({escape(str(val['error']))})")
     wall = (report.get("timings") or {}).get("wall_s")
     cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
-    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    _print_cost(console, report, cost, skipped=skipped, validation_redone=validation_redone)
     for warning in report.get("warnings") or []:
         console.print(f"[yellow]Warning:[/yellow] {warning}", markup=True)
 
@@ -495,7 +511,7 @@ def _print_deforest(report: Mapping[str, Any], *, skipped: bool, out: Path, vali
         console.print(f"Validation: not done ({e(val['error'])})")
     wall = (report.get("timings") or {}).get("wall_s")
     cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
-    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    _print_cost(console, report, cost, skipped=skipped, validation_redone=validation_redone)
     for warning in report.get("warnings") or []:
         console.print(f"[yellow]Warning:[/yellow] {e(warning)}", markup=True)
 
@@ -716,7 +732,7 @@ def _print_wetland(report: Mapping[str, Any], *, skipped: bool, out: Path, valid
         console.print(f"Note: {e(s['storm_note'])}")
     wall = (report.get("timings") or {}).get("wall_s")
     cost = f"{_fmt((report.get('bytes_read') or 0) / 1e9, '.2f')} GB of chunks in {_fmt(wall, '.1f')} s"
-    console.print(f"The run that wrote these outputs read {cost}" if skipped else f"Read {cost}")
+    _print_cost(console, report, cost, skipped=skipped, validation_redone=validation_redone)
     for warning in report.get("warnings") or []:
         console.print(f"[yellow]Warning:[/yellow] {e(warning)}", markup=True)
 

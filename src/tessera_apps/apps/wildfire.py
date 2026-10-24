@@ -46,9 +46,14 @@ Brief section 4.1, as corrected by the pre-build survey, checkpoint 2 and the ch
 - **Validation** (survey S10). Against ``--reference`` (any vector file or GeoTIFF) or NIFC
   perimeters, over every classified AOI pixel of every zone, with the caveats that bound what the
   scores can show. The reference is loaded before any chunk read: a bad ``--reference`` file stops
-  the run with a usage error, and under ``strict_validate`` an unreachable reference does too. A
-  validating rerun whose only missing output is ``validation.json`` redoes the validation from the
-  outputs on disk, without reading a chunk.
+  the run with a usage error, and under ``strict_validate`` an unreachable reference does too. The
+  validation inputs (whether the outline is asked for, the ``--reference`` file, ``fire_name``,
+  the ``--severity`` map and its minimum class) are kept out of the arguments digest, in a
+  validation digest of their own, because nothing but the validation and the preview's outline
+  depends on them. So a rerun whose other outputs are current and whose validation inputs changed
+  (added, changed or removed), or whose ``validation.json`` is missing or not vouched for, redoes the
+  validation from the outputs on disk, without reading a chunk, and redraws the preview from them,
+  so its burned panel shows the outline a full run would.
 - **Burn severity** (the owner's checkpoint 3 decision). ``--severity`` scores the burned mask
   against a thematic severity map in MTBS dnbr6 codes, in any CRS, read onto every zone plan with
   nearest resampling and checked in the preflight (:func:`load_severity`). The scores
@@ -62,8 +67,8 @@ Brief section 4.1, as corrected by the pre-build survey, checkpoint 2 and the ch
   ``--severity-min-class`` is, otherwise the outline IoU together with recall inside the
   reference (:func:`stop_rule`), and the summary's headline (:func:`headline`) puts them in that
   order. The Sentinel-2 dNBR proxy of ``scripts/make_caldor_dnbr.py`` is named as such from its
-  ``TESSERA_APPS_SOURCE`` tag. Adding ``--validate`` to a run that had only ``--severity`` redoes
-  the validation from the outputs on disk, without reading a chunk.
+  ``TESSERA_APPS_SOURCE`` tag. Adding ``--severity`` or ``--validate`` to a finished run, or
+  changing them, redoes the validation from the outputs on disk, without reading a chunk.
 """
 
 from __future__ import annotations
@@ -99,6 +104,7 @@ from tessera_apps.apps._common import (
     mosaic_and_clean,
     prepare_run,
     stride_for_preview,
+    validation_failure_on_record,
     zone_values_from_raster,
 )
 from tessera_apps.export import GridArray, OutputPaths
@@ -1726,8 +1732,18 @@ def run_wildfire(
     no data), ``wildfire_summary.parquet`` and ``.csv`` (one row per recovery year),
     ``wildfire_preview.png``, ``wildfire_validation.json`` when validating or given a severity map,
     and ``wildfire_report.json`` last. A rerun with the same arguments skips (``skipped`` is True)
-    unless ``force``; a validating rerun whose outputs are current except ``validation.json`` redoes
-    only the validation, from the outputs on disk (``validation_redone``).
+    unless ``force``. The validation inputs (``validate``, ``reference``, ``fire_name``,
+    ``severity`` and ``severity_min_class``) are not in the arguments digest but in a validation
+    digest of their own (:func:`~tessera_apps.export.validation_args_digest`), since they shape only
+    ``validation.json``, the report's validation fields and the outline drawn on the preview. So a
+    validating rerun whose other outputs are current and whose validation inputs differ from those
+    the report records, or whose ``validation.json`` is missing or not vouched for, redoes only the
+    validation, from the outputs on disk, without reading a chunk (``validation_redone``), and
+    redraws the preview from those outputs, byte for byte what a full run with these arguments
+    draws. A rerun that asks for no validation skips when the other outputs are current, and its
+    report still vouches for the validation an earlier run wrote, under that run's validation
+    digest. A report written before the validation digest existed is never current for a validating
+    rerun: that rerun is a full run.
 
     With ``severity`` (an MTBS dnbr6 GeoTIFF, or the Sentinel-2 proxy of
     ``scripts/make_caldor_dnbr.py``), ``validation.json`` gets a ``severity`` block
@@ -1735,11 +1751,10 @@ def run_wildfire(
     the outline too, and the stop rule reads the IoU against moderate or worse, whatever
     ``severity_min_class`` is. When the outline reference cannot be loaded, the severity scores are
     still written, and the report does not vouch for the file, so a rerun tries the outline again.
-    Whether the outline was asked for is not in the arguments digest (adding ``validate`` must not
-    re-read the store), so a ``validate`` rerun of a run whose ``validation.json`` has no outline
-    scores (it had only ``severity``) redoes the validation from the outputs on disk too
-    (:func:`_withdraw_validation`); when the outline still cannot be loaded, the report is put
-    back as it was.
+    Whether the outline was asked for is part of the validation digest, so a ``validate`` rerun of
+    a run that had only ``severity`` redoes the validation from the outputs on disk; when the
+    outline still cannot be loaded and nothing else changed, nothing is written and the earlier
+    report stands.
 
     Args:
         aoi: AOI file (any CRS), demo name (``caldor``) or a loaded AOI. Make it extend past the
@@ -1805,15 +1820,10 @@ def run_wildfire(
         "year_a": year_a,
         "year_b": year_b,
         "fire_year": fire,
-        "fire_name": fire_name,
         "threshold": threshold,
         "min_area_ha": min_area_ha,
         "recovery_through": recovery_through,
         "recovery_sim": recovery_sim,
-        "reference": None if ref_path is None else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
-        "severity": None
-        if sev_path is None
-        else {"file": sev_path.name, "sha256": export.file_sha256(sev_path), "min_class": int(severity_min_class)},
         "block": list(block),
         "method": {
             "max_valley_ratio": MAX_VALLEY_RATIO,
@@ -1830,6 +1840,20 @@ def run_wildfire(
             "pca_sample_per_block": PCA_SAMPLE_PER_BLOCK,
             "pca_fit_blocks": PCA_FIT_BLOCKS,
         },
+    }
+    # Only the validation, the report's validation fields and the preview's outline depend on these
+    # (a severity map is never drawn), so they are kept out of the arguments digest: changing them
+    # redoes the validation from the outputs on disk. The reference and NIFC's fire name count only
+    # when the outline is asked for, and the minimum class only with a severity map.
+    validation_params = {
+        "outline": bool(validate),
+        "reference": None
+        if not validate or ref_path is None
+        else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
+        "fire_name": fire_name if validate and ref_path is None else None,
+        "severity": None
+        if sev_path is None
+        else {"file": sev_path.name, "sha256": export.file_sha256(sev_path), "min_class": int(severity_min_class)},
     }
     state = _Reference()
     years_per_block = 1 + len(recovery_years) + (1 if fallback_year is not None else 0)
@@ -1861,6 +1885,7 @@ def run_wildfire(
                     plan, n_recovery_years=len(recovery_years), years_per_block=years_per_block, block=block
                 ),
                 allow_validation_only=True,
+                validation_params=validation_params,
                 preflight=lambda c: _load_reference(
                     c,
                     state,
@@ -1882,18 +1907,6 @@ def run_wildfire(
             raise
 
     ctx = prepare()
-    # The outputs are current, but the validation.json the report vouches for may hold no outline
-    # scores (the earlier run had only --severity): stop vouching for it and prepare again, which
-    # then takes the validation-only path. The report is put back when nothing is redone.
-    vouched = _withdraw_validation(paths.report) if ctx is None and validate else None
-    if vouched is not None:
-        try:
-            ctx = prepare()
-        except BaseException:
-            _restore_report(paths.report, vouched)
-            raise
-        if ctx is None:
-            _restore_report(paths.report, vouched)
     if ctx is None:
         report = json.loads(paths.report.read_text(encoding="utf-8"))
         return WildfireResult(
@@ -1904,18 +1917,7 @@ def run_wildfire(
             validation_written="validation" in (report.get("outputs") or {}),
         )
     if ctx.validation_only:
-        try:
-            result = _redo_validation(ctx, state)
-        except BaseException:
-            if vouched is not None:
-                _restore_report(paths.report, vouched)
-            raise
-        if vouched is not None and not result.validation_redone:
-            # The outline still cannot be loaded: the earlier run's report stands, and the outline
-            # this run asked for was not written.
-            _restore_report(paths.report, vouched)
-            result = dataclasses.replace(result, report=json.loads(vouched), validation_written=False)
-        return result
+        return _redo_validation(ctx, state)
     return _run(
         ctx,
         recovery_years=recovery_years,
@@ -1928,60 +1930,25 @@ def run_wildfire(
     )
 
 
-def _withdraw_validation(report_path: Path) -> str | None:
-    """Make a current report stop vouching for a ``validation.json`` that has no outline scores.
-
-    A run with ``--severity`` and no ``--validate`` writes ``validation.json`` with the severity
-    block only, and its report vouches for it. Whether the outline was asked for is not in the
-    arguments digest, so :func:`export.outputs_current` takes those outputs as current for a later
-    ``--validate`` run with the same other arguments, which would then skip without scoring the
-    outline. Dropping ``validation`` from the report's ``outputs`` (atomically) sends that run down
-    :func:`prepare_run`'s validation-only path instead: the validation is redone from the outputs
-    on disk, without reading a chunk.
-
-    Args:
-        report_path: The report of outputs :func:`prepare_run` found current.
-
-    Returns:
-        The report's previous text when it was rewritten (to put back with :func:`_restore_report`
-        when nothing is redone), None when its validation already has outline scores (``iou``) or
-        it vouches for no validation.
-    """
-    text = report_path.read_text(encoding="utf-8")
-    report = json.loads(text)
-    outputs = dict(report.get("outputs") or {})
-    validation = (report.get("summary") or {}).get("validation") or {}
-    if "validation" not in outputs or "iou" in validation:
-        return None
-    outputs.pop("validation")
-    report["outputs"] = outputs
-    export.write_json(report_path, report)
-    logger.info(
-        "%s: %s vouches for a validation without outline scores, which --validate asks for; the validation is "
-        "redone from the outputs on disk.",
-        APP,
-        report_path,
-    )
-    return text
-
-
-def _restore_report(report_path: Path, text: str) -> None:
-    """Put back a report :func:`_withdraw_validation` rewrote, atomically."""
-    with export.atomic_path(report_path) as tmp:
-        tmp.write_text(text, encoding="utf-8")
-
-
 def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
     """Redo only the validation of a run whose other outputs are current, without reading a chunk.
 
     The burned and classified masks and the distances come back from the run's GeoTIFF
-    (:func:`zone_values_from_raster`). When the outline reference still cannot be loaded, nothing is
-    written and the run counts as skipped (a severity block written by the earlier run stays). The
-    earlier run's validation warnings (:data:`VALIDATION_SKIPPED`, the stop rule's) are replaced by
-    this validation's; its other warnings stay.
+    (:func:`zone_values_from_raster`), and the preview is redrawn from the outputs on disk
+    (:func:`_redraw_preview`), with this validation's outline reference on its burned panel. When
+    the outline reference cannot be loaded and the earlier report already records these validation
+    inputs as not done (:func:`validation_failure_on_record`: the same command, whose reference
+    still fails), nothing is written and the run counts as skipped: the earlier report stands (a
+    severity block written by the earlier run stays). Otherwise the earlier validation file is
+    removed first, so with an outline that cannot be loaded the redo leaves what a full run with
+    these arguments leaves: no validation file, or with ``--severity`` the severity scores alone
+    (the outline not scored), the error in ``summary.validation`` and a :data:`VALIDATION_SKIPPED`
+    warning, and a preview without an outline. The earlier run's validation warnings
+    (:data:`VALIDATION_SKIPPED`, the stop rule's) are replaced by this validation's; its other
+    warnings stay.
     """
     previous = json.loads(ctx.paths.report.read_text(encoding="utf-8"))
-    if state.outline and state.masks is None:
+    if state.outline and state.masks is None and validation_failure_on_record(ctx, previous):
         logger.warning(
             "%s: outputs in %s are current; the validation reference still cannot be loaded (%s), so nothing "
             "was redone.",
@@ -1996,6 +1963,8 @@ def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
             skipped=True,
             validation_written=False,
         )
+    # As a full run's begin_run does: no earlier validation file stays behind this one.
+    ctx.paths.validation.unlink(missing_ok=True)
     plan = ctx.plan
     summary = dict(previous.get("summary") or {})
     threshold = float(summary["threshold"]["threshold"])
@@ -2009,6 +1978,7 @@ def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
     )
     summary["validation"] = validation
     summary["headline"] = headline(validation)
+    _redraw_preview(ctx, state, summary)
     # The validation's own warnings are rebuilt by _validate; every other warning of the run stays.
     old = [
         w
@@ -2025,6 +1995,89 @@ def _redo_validation(ctx: RunContext, state: _Reference) -> WildfireResult:
         skipped=False,
         validation_written=written,
         validation_redone=True,
+    )
+
+
+def _reference_image(plan: AOIPlan, masks: Mapping[str, np.ndarray], dst: str, step: int) -> np.ndarray:
+    """The outline reference mosaicked onto ``dst`` and strided for the preview."""
+    ref_mosaic, _, _ = export.mosaic_zones(
+        [GridArray(masks[z.zone], z) for z in plan.zones], dst_zone=dst, nodata=export.BOOL_NODATA
+    )
+    return ref_mosaic[::step, ::step].copy()
+
+
+def _choice_from_record(record: Mapping[str, Any]) -> ThresholdChoice:
+    """The threshold choice back from its report record (:meth:`ThresholdChoice.record`)."""
+    otsu = record.get("otsu")
+    pair = record.get("stable_pair")
+    return ThresholdChoice(
+        threshold=float(record["threshold"]),
+        method=str(record["method"]),
+        otsu=None if otsu is None else metrics.OtsuResult(**otsu),
+        valley_ratio=record.get("valley_ratio"),
+        bimodal=record.get("bimodal"),
+        fallback_ran=bool(record.get("fallback_ran")),
+        fallback_available=bool(record.get("fallback_available")),
+        stable_pair=None if pair is None else (int(pair[0]), int(pair[1])),
+        stable_p99=record.get("stable_p99"),
+        n_values=int(record.get("n_values") or 0),
+        n_stable_values=record.get("n_stable_values"),
+        note=record.get("note"),
+        fallback_flagged_share=record.get("fallback_flagged_share"),
+        fallback_suspect=record.get("fallback_suspect"),
+    )
+
+
+def _redraw_preview(ctx: RunContext, state: _Reference, summary: Mapping[str, Any]) -> None:
+    """Redraw the preview of a validation redo from the outputs on disk, as a full run draws it.
+
+    A full run draws the outline reference over its burned panel, so a redo against another outline,
+    or none, redraws the preview. Every other input comes back unchanged: the false colour images
+    from the two PCA COGs, the distance and burned bands from the run's GeoTIFF (read whole, then
+    strided as the run strides its mosaic), the distance histogram and the threshold choice from the
+    report's summary, and the recovery curve from the summary parquet. With the same reference the
+    file is byte for byte a full run's.
+
+    Raises:
+        WildfireError: The report holds no distance histogram (it was not written by this version).
+    """
+    if "distance_histogram" not in summary:
+        raise WildfireError(
+            f"{ctx.paths.report} has no distance_histogram, so the preview cannot be redrawn; pass --force to rerun."
+        )
+    plan = ctx.plan
+    dst = max(plan.zones, key=lambda z: z.n_pixels).zone
+    images = {}
+    for name in ("pca_a", "pca_b"):
+        with rasterio.open(ctx.extra_outputs[name]) as ds:
+            rgb = ds.read()
+        images[name] = _image(rgb, stride_for_preview(rgb.shape[1:]))
+        del rgb
+    with rasterio.open(ctx.paths.tif) as ds:
+        step = stride_for_preview((ds.height, ds.width))
+        dist = ds.read(1)[::step, ::step].copy()
+        burned = ds.read(2)[::step, ::step].copy()
+    hist = summary["distance_histogram"]
+    histogram = (
+        None
+        if hist is None
+        else (
+            np.asarray(hist["counts"], dtype=np.int64),
+            np.asarray(hist["edges"], dtype=np.dtype(str(hist["edges_dtype"]))),
+        )
+    )
+    _write_preview(
+        ctx.paths.preview,
+        pca_a=images["pca_a"],
+        pca_b=images["pca_b"],
+        dist=dist,
+        burned=burned,
+        reference=None if state.masks is None else _reference_image(plan, state.masks, dst, step),
+        histogram=histogram,
+        choice=_choice_from_record(summary["threshold"]),
+        table=pd.read_parquet(ctx.paths.summary_parquet),
+        year_a=ctx.year_a,
+        year_b=ctx.year_b,
     )
 
 
@@ -2211,13 +2264,7 @@ def _run(
         export.write_geotiff(ctx.paths.tif, mosaic.data, mosaic.transform, mosaic.crs, band_names=band_names)
     export.write_table(table, ctx.paths.summary_parquet.with_suffix(""))
     step = stride_for_preview(mosaic.data.shape[1:])
-    ref_image = None
-    if reference.masks is not None:
-        ref_mosaic, _, _ = export.mosaic_zones(
-            [GridArray(reference.masks[z.zone], z) for z in plan.zones], dst_zone=dst, nodata=export.BOOL_NODATA
-        )
-        ref_image = ref_mosaic[::step, ::step].copy()
-        del ref_mosaic
+    ref_image = None if reference.masks is None else _reference_image(plan, reference.masks, dst, step)
     _write_preview(
         ctx.paths.preview,
         pca_a=pca_images["pca_a"],
@@ -2273,6 +2320,10 @@ def _run(
         "recovery": table.to_dict(orient="records"),
         "recovery_reference": reference_record,
         "pca": pca_info,
+        # The preview's histogram, kept so a validation redo redraws the preview exactly.
+        "distance_histogram": None
+        if histogram is None
+        else {"counts": histogram[0], "edges": histogram[1], "edges_dtype": str(histogram[1].dtype)},
         "validation": validation,
         "headline": headline(validation),
     }

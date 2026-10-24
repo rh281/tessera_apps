@@ -706,6 +706,70 @@ def test_finish_validation_only_rewrites_the_report_last(boundary_reader, two_zo
         _common.finish_validation_only(ctx, first, summary={}, warnings=[], validation_written=False)
 
 
+def test_the_validation_digest_decides_between_skip_redo_and_full_run(
+    boundary_store, boundary_reader, two_zone_aoi, tmp_path
+):
+    _, log = boundary_store
+    out = tmp_path / "out"
+    scored_a = {"reference": {"file": "a.geojson", "sha256": "1" * 64}}
+    scored_b = {"reference": {"file": "b.geojson", "sha256": "2" * 64}}
+    run = {"k": 1}
+    ctx = _prepare(boundary_reader, two_zone_aoi, out, run, validate=True, validation_params=scored_a)
+    assert ctx.validation_params == scored_a
+    assert ctx.validation_digest == export.validation_args_digest(scored_a)
+    _write_outputs(ctx)
+    export.write_json(ctx.paths.validation, {"scores": {"a": 1}})
+    first = finish_run(ctx, summary={}, extra={}, validation_written=True)
+    assert first["validation_digest"] == ctx.validation_digest and first["validation_params"] == scored_a
+    kw = {"validate": True, "allow_validation_only": True}
+    # The same validation inputs: current. Other ones: only the validation is redone, no chunk is read.
+    assert _prepare(boundary_reader, two_zone_aoi, out, run, validation_params=scored_a, **kw) is None
+    redo = _prepare(boundary_reader, two_zone_aoi, out, run, validation_params=scored_b, **kw)
+    assert redo.validation_only and redo.estimated_bytes == 0 and redo.digest == ctx.digest
+    assert redo.validation_digest == export.validation_args_digest(scored_b) != ctx.validation_digest
+    assert ctx.paths.report.exists() and ctx.paths.validation.exists()
+    # The validation inputs do not reach the arguments digest; a run input does, so it is a full run.
+    full = _prepare(boundary_reader, two_zone_aoi, out, {"k": 2}, validation_params=scored_a, **kw)
+    assert not full.validation_only and full.digest != ctx.digest
+    assert not ctx.paths.report.exists() and not ctx.paths.validation.exists()
+    assert log.chunk_keys() == []
+    # Asking for no validation ignores the validation inputs, and its report vouches for none.
+    plain = _prepare(boundary_reader, two_zone_aoi, out, run, validation_params=scored_a)
+    assert plain.validation_params is None and plain.validation_digest is None
+    _write_outputs(plain)
+    report = finish_run(plain, summary={}, extra={}, validation_written=False)
+    assert report["validation_digest"] is None and report["validation_params"] is None
+
+
+def test_a_redo_records_its_validation_digest_and_an_old_report_never_redoes(boundary_reader, two_zone_aoi, tmp_path):
+    out = tmp_path / "out"
+    scored_a = {"reference": {"file": "a.geojson", "sha256": "1" * 64}}
+    scored_b = {"reference": {"file": "b.geojson", "sha256": "2" * 64}}
+    kw = {"validate": True, "allow_validation_only": True}
+    ctx = _prepare(boundary_reader, two_zone_aoi, out, {}, validation_params=scored_a, validate=True)
+    _write_outputs(ctx)
+    export.write_json(ctx.paths.validation, {"scores": {"a": 1}})
+    first = finish_run(ctx, summary={}, extra={}, validation_written=True)
+    redo = _prepare(boundary_reader, two_zone_aoi, out, {}, validation_params=scored_b, **kw)
+    export.write_json(redo.paths.validation, {"scores": {"b": 1}})
+    report = _common.finish_validation_only(redo, first, summary={}, warnings=[], validation_written=True)
+    assert report["validation_params"] == scored_b and report["validation_digest"] == redo.validation_digest
+    assert _prepare(boundary_reader, two_zone_aoi, out, {}, validation_params=scored_b, **kw) is None
+    # A redo whose validation is not vouched for records no validation digest.
+    again = _prepare(boundary_reader, two_zone_aoi, out, {}, validation_params=scored_a, **kw)
+    assert again.validation_only
+    report = _common.finish_validation_only(again, report, summary={}, warnings=[], validation_written=False)
+    assert report["validation_digest"] is None and "validation" not in report["outputs"]
+    # A report without the validation_digest key (written before it existed): a validating rerun
+    # is a full run, and the previous report and validation.json go before it reads anything.
+    old = dict(report)
+    del old["validation_digest"], old["validation_params"]
+    export.write_json(ctx.paths.report, old)
+    full = _prepare(boundary_reader, two_zone_aoi, out, {}, validation_params=scored_a, **kw)
+    assert not full.validation_only and full.estimated_bytes > 0
+    assert not ctx.paths.report.exists()
+
+
 def test_prepare_run_estimates_memory_and_warns_before_any_chunk_read(
     boundary_store, boundary_reader, two_zone_aoi, tmp_path, monkeypatch, caplog
 ):

@@ -1511,6 +1511,131 @@ def test_a_validation_redone_after_a_plain_run_says_why(main_store, main_files, 
     )
 
 
+def _wetland_made(result) -> dict[str, str]:
+    """The sha256 of every output a validation redo must leave alone: the tif, the tables, the seeds."""
+    paths = result.paths
+    files = (paths.tif, paths.summary_parquet, paths.summary_csv, *result.extra_paths.values())
+    return {p.name: export.file_sha256(p) for p in files}
+
+
+def test_wetland_validation_inputs_added_changed_and_removed_read_no_chunk(
+    main_mem, main_store, main_files, wc_template, tmp_path, no_coast, monkeypatch
+):
+    reader, log = main_store
+
+    # GMW offline: its extent is the stand A box, and it covers the whole grid.
+    def gmw_extent(plan, year, *, version="v3", source=None):
+        rows, cols = np.mgrid[plan.rows, plan.cols]
+        return box_rc(rows, cols, *STAND_A) & plan.mask
+
+    monkeypatch.setattr(validate, "gmw_extent", gmw_extent)
+    monkeypatch.setattr(validate, "gmw_coverage", lambda plan, year, *, version="v3", source=None: plan.mask.copy())
+    grid = reader.grid("17N")
+    ref_a = write_fc(tmp_path / "ref_a.geojson", [grid_box_lonlat(grid, *STAND_A)])
+    ref_b = write_fc(tmp_path / "ref_b.geojson", [grid_box_lonlat(grid, *STAND_B)])
+    kw = {"year_b": 2021, "worldcover_url_template": wc_template}
+    plain = run_main(main_store, main_files, tmp_path, **kw)
+    assert not plain.validation_written and log.chunk_keys()
+    reads = len(log.chunk_keys())
+    made = _wetland_made(plain)
+    unoutlined = export.file_sha256(plain.paths.preview)
+    steps = [
+        {"validate": True},  # added: WorldCover
+        {"validate": True, "seed_buffer_m": 50.0},  # changed
+        {"validate": True, "seed_buffer_m": 50.0, "reference_classes": [90, 95]},  # changed
+        {"validate": True, "reference": ref_a},  # changed: a reference file instead
+        {"validate": True, "reference": ref_b},  # changed: another file
+        {"validate": True, "reference_source": "gmw", "gmw_version": "v4.1.12"},  # changed: GMW
+        {"validate": True},  # the options removed: WorldCover at its defaults again
+    ]
+    fresh_store = (TesseraReader.from_store(KeyLog(main_mem)), None)
+    last = plain.report["validation_digest"]
+    for i, extra in enumerate(steps):
+        redone = run_main(main_store, main_files, tmp_path, **kw, **extra)
+        assert redone.validation_redone and redone.validation_written and not redone.skipped, extra
+        assert len(log.chunk_keys()) == reads, extra
+        report = json.loads(redone.paths.report.read_text())
+        assert report["validation_redone"]["bytes_read"] == 0 and report["args_digest"] == plain.report["args_digest"]
+        assert report["validation_digest"] not in (None, last)
+        last = report["validation_digest"]
+        assert _wetland_made(redone) == made, extra
+        full = run_main(fresh_store, main_files, tmp_path, **kw, **extra, out=tmp_path / f"full{i}")
+        assert _wetland_made(full) == made
+        # One zone: the same scores as a full run, and the preview byte for byte.
+        assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview), extra
+        got = json.loads(redone.paths.validation.read_text())
+        assert got["scores"] == json.loads(full.paths.validation.read_text())["scores"], extra
+        assert redone.summary["validation"] == full.summary["validation"], extra
+        assert report["validation_digest"] == full.report["validation_digest"]
+        caveats = " ".join(got["caveats"])
+        assert ("did not validate" in caveats) is (i == 0) and ("validation inputs differ" in caveats) is (i > 0)
+        assert run_main(main_store, main_files, tmp_path, **kw, **extra).skipped
+    # Turned off: the outputs are current, so the run skips; the report vouches for its last validation.
+    off = run_main(main_store, main_files, tmp_path, **kw)
+    assert off.skipped and off.validation_written and off.report["validation_digest"] == last
+    assert export.file_sha256(off.paths.preview) != unoutlined
+    assert len(log.chunk_keys()) == reads
+
+
+def test_wetland_a_redo_whose_other_reference_cannot_load_withdraws_the_earlier_validation(
+    main_mem, main_store, main_files, wc_template, tmp_path, no_coast, monkeypatch
+):
+    # A validation vouched for against WorldCover, then a rerun asking for GMW, which cannot be
+    # reached: the redo reads no chunk and leaves what a full run with these arguments leaves, not
+    # WorldCover's scores under the new inputs.
+    reader, log = main_store
+    kw = {"year_b": 2021, "worldcover_url_template": wc_template, "validate": True}
+    first = run_main(main_store, main_files, tmp_path, **kw)
+    assert first.validation_written
+    reads = len(log.chunk_keys())
+    made = _wetland_made(first)
+    outlined = export.file_sha256(first.paths.preview)
+
+    def refused(*args, **kwargs):
+        raise validate.ReferenceUnavailableError("zenodo.org refused the request (403)")
+
+    monkeypatch.setattr(validate, "gmw_extent", refused)
+    monkeypatch.setattr(validate, "gmw_coverage", refused)
+    redone = run_main(main_store, main_files, tmp_path, **kw, reference_source="gmw")
+    assert redone.validation_redone and not redone.skipped and not redone.validation_written
+    assert len(log.chunk_keys()) == reads and redone.report["validation_redone"]["bytes_read"] == 0
+    assert _wetland_made(redone) == made
+    assert not redone.paths.validation.exists() and "validation" not in redone.report["outputs"]
+    assert redone.report["validation_digest"] is None
+    assert redone.report["validation_params"]["reference_source"] == "gmw"
+    assert "zenodo.org" in redone.summary["validation"]["error"]
+    assert any(w.startswith(wl.VALIDATION_SKIPPED) for w in redone.report["warnings"])
+    fresh_store = (TesseraReader.from_store(KeyLog(main_mem)), None)
+    full = run_main(fresh_store, main_files, tmp_path, **kw, reference_source="gmw", out=tmp_path / "full")
+    assert not full.paths.validation.exists()
+    assert export.file_sha256(redone.paths.preview) == export.file_sha256(full.paths.preview) != outlined
+    assert redone.summary["validation"] == full.summary["validation"]
+    assert redone.report["validation_params"] == full.report["validation_params"]
+    assert sorted(redone.report["warnings"]) == sorted(full.report["warnings"])
+    # The same command while GMW still cannot be reached: the report already says so; nothing is redone.
+    again = run_main(main_store, main_files, tmp_path, **kw, reference_source="gmw")
+    assert again.skipped and not again.validation_redone and again.report == redone.report
+    assert len(log.chunk_keys()) == reads
+
+
+def test_wetland_compute_change_and_old_report_rerun_in_full(main_store, main_files, wc_template, tmp_path, no_coast):
+    reader, log = main_store
+    kw = {"year_b": 2021, "worldcover_url_template": wc_template, "validate": True}
+    first = run_main(main_store, main_files, tmp_path, **kw)
+    assert first.validation_written
+    reads = len(log.chunk_keys())
+    changed = run_main(main_store, main_files, tmp_path, **kw, threshold_pct=90.0)
+    assert not changed.skipped and not changed.validation_redone and len(log.chunk_keys()) > reads
+    old = json.loads(changed.paths.report.read_text())
+    del old["validation_digest"], old["validation_params"]
+    export.write_json(changed.paths.report, old)
+    reads = len(log.chunk_keys())
+    assert run_main(main_store, main_files, tmp_path, **{**kw, "validate": False}, threshold_pct=90.0).skipped
+    assert len(log.chunk_keys()) == reads
+    again = run_main(main_store, main_files, tmp_path, **kw, threshold_pct=90.0)
+    assert not again.skipped and not again.validation_redone and len(log.chunk_keys()) > reads
+
+
 # --------------------------------------------------------------------------------------------
 # Across the 120 W seam: the extent is cleaned on the mosaic, seeds exclude across the seam
 # --------------------------------------------------------------------------------------------
@@ -1565,6 +1690,30 @@ def test_a_patch_across_the_zone_seam_is_kept_whole(tmp_path, no_coast):
         min_pixels=metrics.area_to_pixels(min_area),
     )
     assert sum(int(m.sum()) for m in whole.values()) == sum(halves)
+
+
+def test_a_validation_redo_across_the_zone_seam_redraws_a_full_runs_preview(tmp_path, no_coast):
+    # A plain run across 120 W, then the same with a reference: the redo reads no chunk and redraws
+    # the preview on the grid of the zone with most AOI pixels, byte for byte a full run's. (The seam
+    # pixels' scores may differ from a full run's, as the validation file says; they are not compared.)
+    reader, log, mem = wetland_store(seam_pattern, zones=("10N", "11N"), centre=BOUNDARY, offsets=False)
+    aoi = write_fc(tmp_path / "aoi.geojson", [box(LON0 - 0.0058, LAT0 - 0.0018, LON0 + 0.0020, LAT0 + 0.0018)])
+    seeds = write_fc(
+        tmp_path / "seeds.geojson",
+        [box(LON0 - 0.0048 + i * 0.001, LAT0 - 0.0002, LON0 - 0.0043 + i * 0.001, LAT0 + 0.0003) for i in range(3)],
+    )
+    ref = write_fc(tmp_path / "ref.geojson", [SEAM_PATCH.buffer(0.0003)])
+    kw = {"seeds": seeds, "block": (32, 32), "min_area_ha": 0.05}
+    plain = wl.run_wetland(aoi, 2020, 2024, tmp_path / "out", reader=reader, **kw)
+    assert plain.summary["zones"] == ["10N", "11N"]
+    unoutlined = export.file_sha256(plain.paths.preview)
+    reads = len(log.chunk_keys())
+    redo = wl.run_wetland(aoi, 2020, 2024, tmp_path / "out", reader=reader, validate=True, reference=ref, **kw)
+    assert redo.validation_redone and redo.validation_written and len(log.chunk_keys()) == reads
+    fresh = TesseraReader.from_store(mem)
+    full = wl.run_wetland(aoi, 2020, 2024, tmp_path / "full", reader=fresh, validate=True, reference=ref, **kw)
+    assert not full.validation_redone and full.validation_written
+    assert export.file_sha256(redo.paths.preview) == export.file_sha256(full.paths.preview) != unoutlined
 
 
 def _centres(z):
@@ -1746,6 +1895,21 @@ def prepared_digest(main_store, main_files, tmp_path, monkeypatch, **kw) -> str:
     return seen[0]
 
 
+def prepared_kind(main_store, main_files, tmp_path, monkeypatch, **kw) -> tuple[str, str, str | None]:
+    """How a run with ``kw`` is prepared: ``"run"`` or ``"redo"`` (validation only), and its two digests."""
+    seen = []
+
+    def stop(ctx, state, opts):
+        seen.append(("redo" if ctx.validation_only else "run", ctx.digest, ctx.validation_digest))
+        raise PreparedError
+
+    monkeypatch.setattr(wl, "_run", stop)
+    monkeypatch.setattr(wl, "_redo_validation", stop)
+    with pytest.raises(PreparedError):
+        run_main(main_store, main_files, tmp_path, **kw)
+    return seen[0]
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     [
@@ -1754,39 +1918,59 @@ def prepared_digest(main_store, main_files, tmp_path, monkeypatch, **kw) -> str:
         ("fold_cell_m", 200.0),
         ("min_area_ha", 0.2),
         ("coast_km", 0.5),
-        ("seed_buffer_m", 50.0),
-        ("reference_classes", [90, 95]),
-        ("reference_source", "gmw"),
-        ("gmw_version", "v4.1.12"),
         ("score", "mahalanobis"),
         ("seed", 3),
-        ("worldcover_url_template", "elsewhere/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"),
     ],
 )
 def test_every_option_changes_the_run_digest(main_store, main_files, tmp_path, monkeypatch, digest_base, option, value):
     kw, base_digest = digest_base
-    monkeypatch.setattr(validate, "gmw_extent", lambda plan, year, *, version="v3", source=None: plan.mask.copy())
-    monkeypatch.setattr(validate, "gmw_coverage", lambda plan, year, *, version="v3", source=None: plan.mask.copy())
-    if option == "worldcover_url_template":
-        value = str(tmp_path / value)
     changed = prepared_digest(main_store, main_files, tmp_path, monkeypatch, **{**kw, option: value})
     assert changed != base_digest
 
 
-def test_the_shoreline_and_reference_files_bytes_change_the_run_digest(
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("seed_buffer_m", 50.0),
+        ("reference_classes", [90, 95]),
+        ("reference_source", "gmw"),
+        ("gmw_version", "v4.1.12"),
+        ("worldcover_url_template", "elsewhere/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif"),
+    ],
+)
+def test_every_validation_option_changes_only_the_validation_digest(
+    main_store, main_files, tmp_path, monkeypatch, digest_base, option, value
+):
+    # These shape only the validation, its report fields and the preview's outline: the arguments
+    # digest stays, so the outputs stay current and the rerun redoes only the validation.
+    kw, base_digest = digest_base
+    base_check = json.loads((tmp_path / "out" / "wetland_report.json").read_text())["validation_digest"]
+    monkeypatch.setattr(validate, "gmw_extent", lambda plan, year, *, version="v3", source=None: plan.mask.copy())
+    monkeypatch.setattr(validate, "gmw_coverage", lambda plan, year, *, version="v3", source=None: plan.mask.copy())
+    if option == "worldcover_url_template":
+        value = str(tmp_path / value)
+    kind, digest, check = prepared_kind(main_store, main_files, tmp_path, monkeypatch, **{**kw, option: value})
+    assert (kind, digest) == ("redo", base_digest)
+    assert check is not None and base_check is not None and check != base_check
+
+
+def test_the_shoreline_bytes_change_the_run_digest_and_the_reference_bytes_the_validation_digest(
     main_store, main_files, tmp_path, monkeypatch, digest_base
 ):
     reader, _ = main_store
     grid = reader.grid("17N")
     kw, base_digest = digest_base
+    ref = write_fc(tmp_path / "ref.geojson", [grid_box_lonlat(grid, *STAND_A)])
+    kind, digest, with_ref = prepared_kind(main_store, main_files, tmp_path, monkeypatch, **kw, reference=ref)
+    assert (kind, digest) == ("redo", base_digest)
+    write_fc(ref, [grid_box_lonlat(grid, *STAND_B)])
+    kind, digest, edited = prepared_kind(main_store, main_files, tmp_path, monkeypatch, **kw, reference=ref)
+    assert (kind, digest) == ("redo", base_digest) and edited != with_ref
+    # The shoreline sets the coastal fraction in the tables: its bytes change the arguments digest.
     to_ll = grid.to_lonlat()
     x = grid.left + 50.5 * grid.pixel
     write_fc(kw["shoreline"], [LineString([to_ll.transform(x, grid.top), to_ll.transform(x, grid.top - 640.0)])])
     assert prepared_digest(main_store, main_files, tmp_path, monkeypatch, **kw) != base_digest
-    ref = write_fc(tmp_path / "ref.geojson", [grid_box_lonlat(grid, *STAND_A)])
-    with_ref = prepared_digest(main_store, main_files, tmp_path, monkeypatch, **kw, reference=ref)
-    write_fc(ref, [grid_box_lonlat(grid, *STAND_B)])
-    assert prepared_digest(main_store, main_files, tmp_path, monkeypatch, **kw, reference=ref) != with_ref
 
 
 # --------------------------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from tessera_apps.export import (
     provenance_record,
     run_args_digest,
     to_jsonable,
+    validation_args_digest,
     write_geotiff,
     write_json,
     write_preview_png,
@@ -1120,24 +1121,30 @@ def _write_outputs(p: OutputPaths, report: object, *, validation: bool) -> None:
     write_json(p.report, report)
 
 
+#: A validation digest for the tests that do not vary the validation inputs.
+VD = validation_args_digest({"reference": None})
+
+
 def test_outputs_current_semantics(tmp_path):
     p = output_paths(tmp_path, "deforest", 2019, 2022)
     digest = run_args_digest({"t": 0.3}, years=[2019, 2022], aoi_sha256="ab", seed=0)
     assert not outputs_current(p, digest, need_validation=False)
 
-    _write_outputs(p, {"args_digest": digest}, validation=False)
+    _write_outputs(p, {"args_digest": digest, "validation_digest": None}, validation=False)
     assert outputs_current(p, digest, need_validation=False)
     assert not outputs_current(p, "0" * 64, need_validation=False)
-    assert not outputs_current(p, digest, need_validation=True)  # no validation.json yet
+    assert not outputs_current(p, digest, need_validation=True, validation_digest=VD)  # no validation.json yet
 
     # A validation.json the report does not list is not this run's, whatever its mtime.
     p.validation.write_bytes(b"{}")
     os.utime(p.validation, ns=(p.report.stat().st_mtime_ns - 1,) * 2)
-    assert not outputs_current(p, digest, need_validation=True)
+    assert not outputs_current(p, digest, need_validation=True, validation_digest=VD)
     assert outputs_current(p, digest, need_validation=False)
 
-    write_json(p.report, {"args_digest": digest, "outputs": outputs_record(p, validation=True)})
-    assert outputs_current(p, digest, need_validation=True)
+    write_json(
+        p.report, {"args_digest": digest, "validation_digest": VD, "outputs": outputs_record(p, validation=True)}
+    )
+    assert outputs_current(p, digest, need_validation=True, validation_digest=VD)
     assert outputs_current(p, digest, need_validation=False)
 
     p.preview.unlink()
@@ -1151,12 +1158,14 @@ def test_outputs_current_accepts_outputs_with_the_same_mtime_as_the_report(tmp_p
     digest = "d" * 64
     for f in (p.tif, p.summary_parquet, p.summary_csv, p.preview, p.validation):
         f.write_bytes(b"x")
-    write_json(p.report, {"args_digest": digest, "outputs": outputs_record(p, validation=True)})
+    write_json(
+        p.report, {"args_digest": digest, "validation_digest": VD, "outputs": outputs_record(p, validation=True)}
+    )
     stamp = p.report.stat().st_mtime_ns
     for f in (p.tif, p.summary_parquet, p.summary_csv, p.preview, p.validation):
         os.utime(f, ns=(stamp, stamp))
     assert outputs_current(p, digest, need_validation=False)
-    assert outputs_current(p, digest, need_validation=True)
+    assert outputs_current(p, digest, need_validation=True, validation_digest=VD)
     os.utime(p.preview, ns=(stamp + 1, stamp + 1))
     assert not outputs_current(p, digest, need_validation=False)
 
@@ -1171,7 +1180,7 @@ def _app_run(p: OutputPaths, *, threshold: float, validate: bool, fetch_ok: bool
     with and a run without validation at one threshold share a digest.
     """
     digest = run_args_digest({"threshold": threshold}, years=THRESHOLD_APP_YEARS, aoi_sha256="ab", seed=0)
-    if outputs_current(p, digest, need_validation=validate):
+    if outputs_current(p, digest, need_validation=validate, validation_digest=VD if validate else None):
         return digest
     if begin:
         begin_run(p)
@@ -1187,7 +1196,14 @@ def _app_run(p: OutputPaths, *, threshold: float, validate: bool, fetch_ok: bool
             p.validation, scores={"burned": {"iou": threshold}}, reference={"threshold": threshold}, caveats=[]
         )
         wrote_validation = True
-    write_json(p.report, {"args_digest": digest, "outputs": outputs_record(p, validation=wrote_validation)})
+    write_json(
+        p.report,
+        {
+            "args_digest": digest,
+            "validation_digest": VD if wrote_validation else None,
+            "outputs": outputs_record(p, validation=wrote_validation),
+        },
+    )
     return digest
 
 
@@ -1200,7 +1216,7 @@ def test_outputs_current_rejects_a_validation_json_left_by_another_run(tmp_path,
     p = output_paths(tmp_path, "wildfire", *THRESHOLD_APP_YEARS)
     # 1. --threshold 0.30 --validate: validation.json scored at 0.30.
     x = _app_run(p, threshold=0.30, validate=True, begin=begin)
-    assert outputs_current(p, x, need_validation=True)
+    assert outputs_current(p, x, need_validation=True, validation_digest=VD)
     assert _validated_threshold(p) == 0.30
     # 2. --threshold 0.45 without --validate: new tif, tables, preview and report.
     y = _app_run(p, threshold=0.45, validate=False, begin=begin)
@@ -1209,12 +1225,12 @@ def test_outputs_current_rejects_a_validation_json_left_by_another_run(tmp_path,
     assert p.validation.exists() is not begin  # begin_run removes the stale file; without it, it stays
     # 3. --threshold 0.45 --validate must not be skipped, even with the 0.30 file still on disk and
     # older than the report.
-    assert not outputs_current(p, y, need_validation=True)
+    assert not outputs_current(p, y, need_validation=True, validation_digest=VD)
     _app_run(p, threshold=0.45, validate=True, begin=begin)
     assert _validated_threshold(p) == 0.45
-    assert outputs_current(p, y, need_validation=True)
+    assert outputs_current(p, y, need_validation=True, validation_digest=VD)
     # A rerun with the first arguments is not current either: the outputs are the 0.45 run's.
-    assert not outputs_current(p, x, need_validation=True)
+    assert not outputs_current(p, x, need_validation=True, validation_digest=VD)
     assert not outputs_current(p, x, need_validation=False)
 
 
@@ -1225,33 +1241,73 @@ def test_outputs_current_rejects_validation_from_before_a_failed_reference_fetch
     # A --validate run at 0.45 whose reference fetch fails (NIFC 403) still writes its report.
     y = _app_run(p, threshold=0.45, validate=True, fetch_ok=False, begin=begin)
     assert outputs_current(p, y, need_validation=False)
-    assert not outputs_current(p, y, need_validation=True)
+    assert not outputs_current(p, y, need_validation=True, validation_digest=VD)
     assert p.validation.exists() is not begin
 
 
 def test_outputs_current_checks_the_hashes_the_report_lists(tmp_path):
     p = output_paths(tmp_path, "wildfire", *THRESHOLD_APP_YEARS)
     y = _app_run(p, threshold=0.45, validate=True)
-    assert outputs_current(p, y, need_validation=True)
+    assert outputs_current(p, y, need_validation=True, validation_digest=VD)
     # An older validation.json copied back over this run's (same name, older mtime): rejected.
     stamp = p.validation.stat().st_mtime_ns
     old = p.validation.read_text().replace("0.45", "0.3")
     p.validation.write_text(old)
     os.utime(p.validation, ns=(stamp, stamp))
-    assert not outputs_current(p, y, need_validation=True)
+    assert not outputs_current(p, y, need_validation=True, validation_digest=VD)
     assert outputs_current(p, y, need_validation=False)  # not required, so not checked
     # Any listed output whose bytes changed is rejected too.
     _app_run(p, threshold=0.45, validate=True)
-    assert outputs_current(p, y, need_validation=True)
+    assert outputs_current(p, y, need_validation=True, validation_digest=VD)
     stamp = p.summary_csv.stat().st_mtime_ns
     p.summary_csv.write_text("threshold,burned_px\n0.45,0\n")
     os.utime(p.summary_csv, ns=(stamp, stamp))
     assert not outputs_current(p, y, need_validation=False)
     # A malformed "outputs" entry is never current.
-    write_json(p.report, {"args_digest": y, "outputs": ["validation"]})
+    write_json(p.report, {"args_digest": y, "validation_digest": VD, "outputs": ["validation"]})
     assert not outputs_current(p, y, need_validation=False)
-    write_json(p.report, {"args_digest": y, "outputs": None})
-    assert not outputs_current(p, y, need_validation=True)
+    write_json(p.report, {"args_digest": y, "validation_digest": VD, "outputs": None})
+    assert not outputs_current(p, y, need_validation=True, validation_digest=VD)
+
+
+def test_validation_args_digest_is_its_own(tmp_path):
+    # The validation digest covers the validation inputs only, canonically, and differs from any
+    # run digest of the same params.
+    a = validation_args_digest({"reference": {"file": "a.geojson", "sha256": "1" * 64}, "outline": True})
+    assert a == validation_args_digest({"outline": True, "reference": {"file": "a.geojson", "sha256": "1" * 64}})
+    assert a != validation_args_digest({"outline": True, "reference": {"file": "a.geojson", "sha256": "2" * 64}})
+    assert a != validation_args_digest({"outline": True, "reference": None})
+    assert validation_args_digest({}) != args_digest({})
+    params = {"outline": True}
+    assert validation_args_digest(params) != run_args_digest(params, years=[2020], aoi_sha256=None, seed=None)
+
+
+def test_outputs_current_checks_the_validation_digest(tmp_path):
+    p = output_paths(tmp_path, "wildfire", *THRESHOLD_APP_YEARS)
+    digest = "d" * 64
+    scored_a = validation_args_digest({"reference": {"file": "a.geojson", "sha256": "1" * 64}})
+    scored_b = validation_args_digest({"reference": {"file": "b.geojson", "sha256": "2" * 64}})
+    _write_outputs(p, {}, validation=True)
+    write_json(
+        p.report, {"args_digest": digest, "validation_digest": scored_a, "outputs": outputs_record(p, validation=True)}
+    )
+    assert outputs_current(p, digest, need_validation=True, validation_digest=scored_a)
+    # Scored against another reference: not current for a run that validates against b...
+    assert not outputs_current(p, digest, need_validation=True, validation_digest=scored_b)
+    # ...and the other outputs still are, for a run that does not validate.
+    assert outputs_current(p, digest, need_validation=False)
+    # A report written before the validation digest existed is never current for a validating run.
+    write_json(p.report, {"args_digest": digest, "outputs": outputs_record(p, validation=True)})
+    assert not outputs_current(p, digest, need_validation=True, validation_digest=scored_a)
+    assert outputs_current(p, digest, need_validation=False)
+    # A report that vouches for no validation records None, which no validating run's digest matches.
+    write_json(
+        p.report, {"args_digest": digest, "validation_digest": None, "outputs": outputs_record(p, validation=False)}
+    )
+    assert not outputs_current(p, digest, need_validation=True, validation_digest=scored_a)
+    # A validating check without the run's validation digest is a programming error, not a skip.
+    with pytest.raises(ValueError, match="validation digest"):
+        outputs_current(p, digest, need_validation=True)
 
 
 def test_outputs_record_and_begin_run(tmp_path):

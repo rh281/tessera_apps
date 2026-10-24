@@ -66,7 +66,12 @@ Brief section 4.3, as corrected by the pre-build survey (B5, B6, S2, S15, N9, N1
   maps agree. A reference that cannot be loaded, or covers no AOI pixel, warns and the run
   completes (or stops before any chunk read under ``strict_validate``); an identical validating
   rerun then redoes only the validation, from the outputs on disk (as does a validating rerun of a
-  run that did not validate).
+  run that did not validate). The validation inputs (``reference``, ``reference_source``,
+  ``reference_classes``, ``gmw_version``, ``seed_buffer_m`` and the WorldCover tile template) shape
+  nothing but the validation, the report's validation fields and the reference outline on the
+  preview, so they are kept out of the arguments digest, in a validation digest of their own:
+  changing them redoes the validation from the outputs on disk, without reading a chunk, and
+  redraws the preview from them.
 """
 
 from __future__ import annotations
@@ -110,6 +115,7 @@ from tessera_apps.apps._common import (
     probe_radar_regime,
     regime_name,
     stride_for_preview,
+    validation_failure_on_record,
     zone_values_from_raster,
 )
 from tessera_apps.export import GridArray, OutputPaths
@@ -247,10 +253,11 @@ REDONE_CAVEAT = (
     "This validation was redone from the outputs on disk without reading the store ({reason}). For an AOI in one zone "
     "the scores equal a full run's; across zones a few pixels along the seam may differ, where the mosaic moved them."
 )
-#: Why a validation was redone, from the earlier run's summary (:func:`_redo_reason`).
+#: Why a validation was redone, from the earlier run's report (:func:`_redo_reason`).
 REDO_REASONS = {
     "not_validated": "the run that made them did not validate",
     "reference_failed": "the run that made them could not load its reference",
+    "changed": "the validation inputs differ from those of the run that made them",
     "missing": "their validation.json was missing or did not match their report",
 }
 COAST_NOTE = (
@@ -1423,10 +1430,21 @@ def run_wetland(
     and ``.csv`` (one row per year, the change columns repeated so the csv stands alone),
     ``wetland_seeds.parquet`` (every seed pixel: where it is, its fold, scores, whether it was used),
     ``wetland_preview.png``, ``wetland_validation.json`` when validating, and ``wetland_report.json``
-    last. A rerun with the same arguments skips unless ``force``; a validating rerun whose outputs are
-    current except ``validation.json`` redoes only the validation, from the outputs on disk; and a
-    rerun without ``shoreline`` whose outputs lack the coastal fraction (Natural Earth could not be
-    loaded) retries Natural Earth first, and is redone when it loads.
+    last. A rerun with the same arguments skips unless ``force``, and a rerun without ``shoreline``
+    whose outputs lack the coastal fraction (Natural Earth could not be loaded) retries Natural Earth
+    first, and is redone when it loads. The validation inputs (``validate``, ``reference``,
+    ``reference_source``, ``reference_classes``, ``gmw_version``, ``seed_buffer_m`` and
+    ``worldcover_url_template``) are not in the arguments digest but in a validation digest of their
+    own (:func:`~tessera_apps.export.validation_args_digest`): they shape only ``validation.json``,
+    the report's validation fields and the reference outline on the preview. So a validating rerun
+    whose other outputs are current and whose validation inputs differ from those the report
+    records, or whose ``validation.json`` is missing or not vouched for, redoes only the validation,
+    from the outputs on disk, without reading a chunk (``validation_redone``), and redraws the
+    preview from those outputs, byte for byte what a full run with these arguments draws. A rerun
+    that asks for no validation skips when the other outputs are current, and its report still
+    vouches for the validation an earlier run wrote, under that run's validation digest. A report
+    written before the validation digest existed is never current for a validating rerun: that rerun
+    is a full run.
 
     Args:
         aoi: AOI file (any CRS), demo name (``everglades``) or a loaded AOI.
@@ -1515,12 +1533,6 @@ def run_wetland(
         if shore_path is None
         else {"file": shore_path.name, "sha256": export.file_sha256(shore_path)},
         "coast_km": coast_km,
-        "reference": None if ref_path is None else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
-        "reference_source": None if ref_path is not None else reference_source,
-        "reference_classes": list(classes),
-        "gmw_version": gmw_version.strip().lower(),
-        "seed_buffer_m": seed_buffer_m,
-        "worldcover_url_template": template,
         "block": list(block),
         "method": {
             "min_seed_pixels": MIN_SEED_PIXELS,
@@ -1549,6 +1561,17 @@ def run_wetland(
         max_zones=max_zones,
         large=max_area_km2 is None,
     )
+    # These shape only the validation, the report's validation fields and the reference outline on
+    # the preview, so they are kept out of the arguments digest: changing them redoes the validation
+    # from the outputs on disk.
+    validation_params = {
+        "reference": None if ref_path is None else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
+        "reference_source": None if ref_path is not None else reference_source,
+        "reference_classes": list(classes),
+        "gmw_version": gmw_version.strip().lower(),
+        "seed_buffer_m": seed_buffer_m,
+        "worldcover_url_template": template,
+    }
     state = _State()
     if not force and shore_path is None and _coast_failed_before(paths.report):
         # The outputs on disk lack the coastal fraction (survey N9) because Natural Earth could not be
@@ -1577,6 +1600,7 @@ def run_wetland(
         code_modules=(sys.modules[__name__],),
         memory_estimate=lambda plan: memory_estimate(plan, block=block, coast_km=coast_km),
         allow_validation_only=True,
+        validation_params=validation_params,
         preflight=lambda c: _preflight(c, state, opts),
     )
     if ctx is None:
@@ -2223,17 +2247,7 @@ def _run(ctx: RunContext, state: _State, opts: _Options) -> WetlandResult:
     export.write_table(summary_table, ctx.paths.summary_parquet.with_suffix(""))
     _write_seeds(ctx.extra_outputs["seeds"], table, ctx.aoi.geometry)
     step = stride_for_preview(mosaic.data.shape[1:])
-    ref_image = None
-    ref_year = None
-    if state.ref.masks is not None and state.ref.years:
-        ref_year = year_a if year_a in state.ref.years else state.ref.years[0]
-        ref_mosaic, _, _ = export.mosaic_zones(
-            [GridArray(state.ref.masks[ref_year][z.zone], z) for z in plan.zones],
-            dst_zone=dst,
-            nodata=export.BOOL_NODATA,
-        )
-        ref_image = ref_mosaic[::step, ::step].copy()
-        del ref_mosaic
+    ref_image, ref_year = _reference_image(plan, state.ref, year_a, dst, step)
     _write_preview(
         ctx.paths.preview,
         score_a=mosaic.data[0, ::step, ::step],
@@ -2536,12 +2550,13 @@ def _validate(
     return summary, True
 
 
-def _redo_reason(previous: Mapping[str, Any]) -> str:
+def _redo_reason(previous: Mapping[str, Any], validation_params: Mapping[str, Any] | None = None) -> str:
     """Why the validation of an otherwise current run is redone: a key of :data:`REDO_REASONS`.
 
-    The earlier run's summary says it: no validation block (it did not validate, which the digest
-    does not cover), a validation block with an error (its reference could not be loaded), or a
-    complete one (its ``validation.json`` went missing or was changed since).
+    The earlier run's report says it: no validation block (it did not validate, which the
+    arguments digest does not cover), a validation block with an error (its reference could not be
+    loaded), validation inputs other than ``validation_params`` (the validation digest differs), or
+    none of these (its ``validation.json`` went missing or was changed since).
     """
     summary = previous.get("summary")
     validation = summary.get("validation") if isinstance(summary, Mapping) else None
@@ -2549,6 +2564,8 @@ def _redo_reason(previous: Mapping[str, Any]) -> str:
         return "not_validated"
     if validation.get("error"):
         return "reference_failed"
+    if validation_params is not None and previous.get("validation_params") != export.to_jsonable(validation_params):
+        return "changed"
     return "missing"
 
 
@@ -2557,11 +2574,17 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> WetlandR
 
     Both years' extents and the classified pixels come back from the run's GeoTIFF
     (:func:`zone_values_from_raster`), and the seed exclusion from the seeds, placed again from
-    metadata. When the reference still cannot be loaded, nothing is written and the run counts as
-    skipped.
+    metadata; the preview is redrawn from the outputs on disk (:func:`_redraw_preview`), with this
+    validation's reference outline. When the reference cannot be loaded and the earlier report
+    already records these validation inputs as not done (:func:`validation_failure_on_record`: the
+    same command, whose reference still fails), nothing is written and the run counts as skipped:
+    the earlier report stands. Otherwise the earlier validation file is removed first, so with a
+    reference that cannot be loaded the redo leaves what a full run with these arguments leaves: no
+    validation file, the error in ``summary.validation``, a :data:`VALIDATION_SKIPPED` warning and a
+    preview without an outline.
     """
     previous = json.loads(ctx.paths.report.read_text(encoding="utf-8"))
-    if state.ref.masks is None:
+    if state.ref.masks is None and validation_failure_on_record(ctx, previous):
         logger.warning(
             "%s: outputs in %s are current; the validation reference still cannot be loaded (%s), so nothing "
             "was redone.",
@@ -2576,6 +2599,8 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> WetlandR
             skipped=True,
             validation_written=False,
         )
+    # As a full run's begin_run does: no earlier validation file stays behind this one.
+    ctx.paths.validation.unlink(missing_ok=True)
     assert state.table is not None
     plan = ctx.plan
     ext_a = zone_values_from_raster(ctx.paths.tif, plan, band=3)
@@ -2591,10 +2616,11 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> WetlandR
         extent_b={z: v == 1 for z, v in ext_b.items()},
         classified=classified,
         exclusion=exclusion,
-        extra_caveats=[REDONE_CAVEAT.format(reason=REDO_REASONS[_redo_reason(previous)])],
+        extra_caveats=[REDONE_CAVEAT.format(reason=REDO_REASONS[_redo_reason(previous, ctx.validation_params)])],
     )
     summary = dict(previous.get("summary") or {})
     summary["validation"] = validation
+    _redraw_preview(ctx, state, summary)
     old = [w for w in previous.get("warnings") or [] if not str(w).startswith(VALIDATION_SKIPPED)]
     report = finish_validation_only(
         ctx, previous, summary=summary, warnings=[*old, *ctx.warnings], validation_written=written
@@ -2612,6 +2638,61 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> WetlandR
 # --------------------------------------------------------------------------------------------
 # Preview
 # --------------------------------------------------------------------------------------------
+
+
+def _reference_image(
+    plan: AOIPlan, ref: _Reference, year_a: int, dst: str, step: int
+) -> tuple[np.ndarray | None, int | None]:
+    """The reference outline for the preview, mosaicked onto ``dst`` and strided, and its year.
+
+    The year is ``year_a`` when the reference scores it, else the first year it scores; None and
+    None when no reference was loaded.
+    """
+    if ref.masks is None or not ref.years:
+        return None, None
+    year = year_a if year_a in ref.years else ref.years[0]
+    ref_mosaic, _, _ = export.mosaic_zones(
+        [GridArray(ref.masks[year][z.zone], z) for z in plan.zones],
+        dst_zone=dst,
+        nodata=export.BOOL_NODATA,
+    )
+    return ref_mosaic[::step, ::step].copy(), year
+
+
+def _redraw_preview(ctx: RunContext, state: _State, summary: Mapping[str, Any]) -> None:
+    """Redraw the preview of a validation redo from the outputs on disk, as a full run draws it.
+
+    A full run draws the reference outline over an extent panel, so a redo against another
+    reference redraws the preview. Every other input comes back unchanged: the five bands from the
+    run's GeoTIFF (read whole, then strided as the run strides its mosaic), the seed scores from the
+    seeds parquet (every seed pixel, in the run's order), and the threshold choice from the report's
+    summary. With the same reference the file is byte for byte a full run's.
+    """
+    plan = ctx.plan
+    dst = max(plan.zones, key=lambda zp: zp.n_pixels).zone
+    with rasterio.open(ctx.paths.tif) as ds:
+        data = ds.read()
+    step = stride_for_preview(data.shape[1:])
+    seeds = pd.read_parquet(ctx.extra_outputs["seeds"], columns=["score_heldout", "score_in_sample"])
+    record = dict(summary["threshold"])
+    choice = ThresholdChoice(**{f.name: record[f.name] for f in dataclasses.fields(ThresholdChoice)})
+    ref_image, ref_year = _reference_image(plan, state.ref, ctx.year_a, dst, step)
+    _write_preview(
+        ctx.paths.preview,
+        score_a=data[0, ::step, ::step],
+        score_b=data[1, ::step, ::step],
+        extent_a=data[2, ::step, ::step],
+        extent_b=data[3, ::step, ::step],
+        change=data[4, ::step, ::step],
+        reference=ref_image,
+        reference_year=ref_year,
+        heldout=seeds["score_heldout"].to_numpy(dtype=np.float64),
+        in_sample=seeds["score_in_sample"].to_numpy(dtype=np.float64),
+        choice=choice,
+        year_a=ctx.year_a,
+        year_b=ctx.year_b,
+    )
+    del data
 
 
 def _write_preview(

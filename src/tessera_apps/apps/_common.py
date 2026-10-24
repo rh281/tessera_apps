@@ -276,6 +276,11 @@ class RunContext:
         digest: The arguments digest recorded in the report (:func:`export.run_args_digest`).
         params: The params the digest covers, including the AOI geometry hash, the code record and
             the data snapshot id.
+        validation_params: The validation inputs (:func:`prepare_run`'s ``validation_params``) when
+            the run validates, else None.
+        validation_digest: :func:`export.validation_args_digest` of ``validation_params`` when the
+            run validates, else None; the report records it only when it vouches for
+            ``validation.json``.
         years_read: Every year checked up front (all the app may read).
         year_a: First year of the comparison.
         year_b: Second year.
@@ -286,9 +291,11 @@ class RunContext:
         t0: ``time.perf_counter()`` at the start of :func:`prepare_run`.
         bytes_at_start: ``reader.bytes_read`` at the start, so a reused reader reports this run only.
         estimated_bytes: The plan's in-memory upper bound for ``year_reads`` year-reads of every block.
-        validation_only: Every output is current except ``validation.json`` (an earlier validating
-            run could not load its reference): the app only redoes the validation, from its own
-            outputs, without reading a chunk. The previous report is kept until it is rewritten.
+        validation_only: Every output is current except ``validation.json``: it is missing, the
+            report does not vouch for it (an earlier validating run could not load its reference,
+            or the run did not validate), or it was scored against other validation inputs (another
+            validation digest). The app only redoes the validation, from its own outputs, without
+            reading a chunk. The previous report is kept until it is rewritten.
         estimated_memory: The app's peak memory estimate in bytes, or None.
         years_used: Years the app actually read (:meth:`mark_read`); the report's provenance lists
             these, and ``years_read`` as the years checked.
@@ -317,6 +324,8 @@ class RunContext:
     bytes_at_start: int
     estimated_bytes: int
     validation_only: bool = False
+    validation_params: dict[str, Any] | None = None
+    validation_digest: str | None = None
     estimated_memory: int | None = None
     years_used: set[int] = dataclasses.field(default_factory=set)
     zones_read: dict[str, set[int]] = dataclasses.field(default_factory=dict)
@@ -374,6 +383,19 @@ def _extras_current(report_path: Path, extras: Mapping[str, Path]) -> bool:
         if entry.get("sha256") != export.file_sha256(path):
             return False
     return True
+
+
+def _records_validation_digest(report_path: Path) -> bool:
+    """Whether the report on disk has a ``"validation_digest"`` entry (written since that digest exists).
+
+    A report from before the validation digest existed cannot say what its ``validation.json`` was
+    scored against, so a validating rerun of it is a full run, never a validation-only redo.
+    """
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(report, dict) and "validation_digest" in report
 
 
 def _open_reader(snapshot_id: str | None) -> Reader:
@@ -482,6 +504,7 @@ def prepare_run(
     memory_estimate: Callable[[AOIPlan], int] | None = None,
     allow_validation_only: bool = False,
     preflight: Callable[[RunContext], None] | None = None,
+    validation_params: Mapping[str, Any] | None = None,
 ) -> RunContext | None:
     """Open the store, plan the AOI, check every year, and decide whether to run.
 
@@ -495,12 +518,17 @@ def prepare_run(
        (:func:`io.reader_check_years`), so a publication gap stops the run before any chunk read.
     4. Compute the arguments digest over ``params`` plus the AOI geometry hash
        (:attr:`LoadedAOI.geometry_sha256`), the code record (:func:`code_record`) and the store's
-       snapshot id, and over the years, the AOI file's sha256 and the seed. Unless ``force``, return
-       None when :func:`export.outputs_current` says an earlier run with the same digest left every
-       output intact (and every extra output still has the sha256 its report recorded).
+       snapshot id, and over the years, the AOI file's sha256 and the seed; and, for a validating
+       run, the validation digest over ``validation_params``
+       (:func:`export.validation_args_digest`). Unless ``force``, return None when
+       :func:`export.outputs_current` says an earlier run with the same digest (and, validating,
+       the same validation digest) left every output intact (and every extra output still has the
+       sha256 its report recorded).
     5. With ``allow_validation_only``, a validating run whose outputs are all current except
-       ``validation.json`` gets a context with ``validation_only`` set: the app redoes only the
-       validation and reads no chunk (survey S19, an earlier run could not load its reference).
+       ``validation.json`` (missing, not vouched for, or scored with another validation digest)
+       gets a context with ``validation_only`` set: the app redoes only the validation and reads
+       no chunk (survey S19). A report written before the validation digest existed never takes
+       this path: its validating rerun is a full run.
     6. Check that ``out_dir`` can be created and written (:func:`check_out_dir`), log the plan
        (zones, AOI hectares, estimated bytes and, with ``memory_estimate``, the peak memory, with a
        warning when it exceeds the memory available), and run ``preflight``.
@@ -532,6 +560,12 @@ def prepare_run(
         preflight: Called with the context after the plan is logged and before ``begin_run``, still
             before any chunk read: an app loads its validation reference here, so a bad reference
             fails early and leaves the previous outputs alone.
+        validation_params: The inputs that shape only ``validation.json`` and the report's
+            validation fields (reference files by name and sha256, reference sources and options),
+            kept out of ``params`` so that changing them can redo only the validation. Any input
+            that shapes another output (the tif, the tables, the preview outside what the app's
+            validation redo redraws, the report's other fields) belongs in ``params``. Used only
+            when ``validate``.
 
     Returns:
         The run context, or None when the outputs are current.
@@ -561,12 +595,17 @@ def prepare_run(
         "data_snapshot_id": reader.provenance().get("snapshot_id"),
     }
     digest = export.run_args_digest(run_params, years=years, aoi_sha256=loaded.sha256, seed=seed)
+    vparams = dict(validation_params or {}) if validate else None
+    vdigest = None if vparams is None else export.validation_args_digest(vparams)
     if not force and _extras_current(paths.report, extras):
-        if export.outputs_current(paths, digest, need_validation=validate):
+        if export.outputs_current(paths, digest, need_validation=validate, validation_digest=vdigest):
             logger.info("%s: outputs in %s are current for these arguments; pass --force to rerun.", app, out_dir)
             return None
         validation_only = (
-            allow_validation_only and validate and export.outputs_current(paths, digest, need_validation=False)
+            allow_validation_only
+            and validate
+            and export.outputs_current(paths, digest, need_validation=False)
+            and _records_validation_digest(paths.report)
         )
     else:
         validation_only = False
@@ -593,12 +632,15 @@ def prepare_run(
         bytes_at_start=bytes_at_start,
         estimated_bytes=int(estimated),
         validation_only=validation_only,
+        validation_params=vparams,
+        validation_digest=vdigest,
     )
     zones_text = ", ".join(f"{z.zone} {z.shape[0]} x {z.shape[1]}" for z in plan.zones)
     if validation_only:
         logger.info(
-            "%s: outputs in %s are current except the validation, which an earlier run could not load; "
-            "only the validation is redone, from the outputs on disk, without reading a chunk.",
+            "%s: outputs in %s are current except the validation (missing, not loaded by the run that made "
+            "them, or scored against other validation inputs); only the validation is redone, from the outputs "
+            "on disk, without reading a chunk.",
             app,
             out_dir,
         )
@@ -685,8 +727,10 @@ def finish_run(
     """Write ``<app>_report.json``, after every other output, and return it.
 
     The report holds the arguments digest (what :func:`prepare_run` compares to skip a rerun), the
-    provenance block (:func:`export.provenance_record`: ``years`` lists the years the app read,
-    recorded with :meth:`RunContext.mark_read`, and ``years_checked`` every year checked up front),
+    validation inputs (``validation_params``) and, when the report vouches for ``validation.json``,
+    their digest (``validation_digest``, None otherwise), the provenance block
+    (:func:`export.provenance_record`: ``years`` lists the years the app read, recorded with
+    :meth:`RunContext.mark_read`, and ``years_checked`` every year checked up front),
     the app's summary, the params, wall time and stage timings, the chunk payload bytes read, the
     sha256 of every standard output (:func:`export.outputs_record`) and of each extra output, and
     the warnings.
@@ -712,6 +756,8 @@ def finish_run(
     report = {
         "app": ctx.app,
         "args_digest": ctx.digest,
+        "validation_params": ctx.validation_params,
+        "validation_digest": ctx.validation_digest if validation_written else None,
         "provenance": _provenance(ctx),
         "aoi": {
             "name": ctx.aoi.name,
@@ -750,9 +796,10 @@ def finish_validation_only(
     """Rewrite the report of a ``validation_only`` run, after ``validation.json``, and return it.
 
     Everything the earlier run recorded stays (its digest, provenance, params, timings and bytes
-    read describe how the outputs were made); the summary, the warnings and the output hashes are
-    replaced, and ``validation_redone`` records when the validation was redone, how long it took and
-    the chunk bytes it read (none).
+    read describe how the outputs were made); the summary, the warnings, the output hashes (the app
+    may have redrawn its preview too) and the validation inputs and digest are replaced, and
+    ``validation_redone`` records when the validation was redone, how long it took and the chunk
+    bytes it read (none).
 
     Args:
         ctx: From :func:`prepare_run`, with ``validation_only`` set.
@@ -770,6 +817,8 @@ def finish_validation_only(
     report["summary"] = dict(summary)
     report["warnings"] = list(warnings)
     report["outputs"] = export.outputs_record(ctx.paths, validation=validation_written)
+    report["validation_params"] = ctx.validation_params
+    report["validation_digest"] = ctx.validation_digest if validation_written else None
     report["validation_redone"] = {
         "utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "wall_s": round(time.perf_counter() - ctx.t0, 3),
@@ -778,6 +827,25 @@ def finish_validation_only(
     export.write_json(ctx.paths.report, report)
     logger.info("%s: validation redone without reading a chunk; report rewritten.", ctx.app)
     return cast(dict[str, Any], export.to_jsonable(report))
+
+
+def validation_failure_on_record(ctx: RunContext, previous: Mapping[str, Any]) -> bool:
+    """Whether the earlier report already records this validation as not done: same inputs, not vouched for.
+
+    A validation redo whose reference cannot be loaded skips only then: it is a rerun of the same
+    command whose reference still fails, and the earlier report already says why (its
+    ``summary.validation.error`` and warnings). With other validation inputs, or with a report that
+    vouches for a validation file that has since gone missing or changed, the redo goes on: it
+    removes the earlier validation file and records the failure, as a full run with these
+    arguments would.
+
+    Args:
+        ctx: From :func:`prepare_run`, with ``validation_only`` set.
+        previous: The report on disk.
+    """
+    return previous.get("validation_digest") is None and previous.get("validation_params") == export.to_jsonable(
+        ctx.validation_params
+    )
 
 
 # --------------------------------------------------------------------------------------------
@@ -1187,5 +1255,6 @@ __all__ = [
     "regime_name",
     "spread_indices",
     "stride_for_preview",
+    "validation_failure_on_record",
     "zone_values_from_raster",
 ]

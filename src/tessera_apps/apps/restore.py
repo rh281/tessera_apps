@@ -1583,6 +1583,16 @@ def run_restore(
     one whose canopy check failed because the host could not be reached or a tile was missing is
     redone once every tile the check needs can be reached (a broken tile needs ``force``).
 
+    Unlike the other apps, restore has no validation-only redo: adding ``validate`` to a finished
+    run, or rerunning one whose ``validation.json`` is missing, reads the store again. The canopy
+    check is not validation-only (its per-year heights fill canopy columns of the summary tables
+    and a panel of the preview), and it needs the site, control and target pixels the run kept
+    after its panel and regime rule: the outputs on disk hold the site's and the control's (the
+    GeoTIFF's role band) but not which target pixels were kept (the target is read on a plan of its
+    own, and the GeoTIFF covers the site and its control). The null
+    test is computed on every run from the control's embeddings, whether or not it validates. A
+    rerun that asks for no validation skips when the other outputs are current.
+
     Args:
         aoi: The site: a polygon file (any CRS), a demo name, ``<demo>:<role>`` for another feature
             of a demo (``itapebi:negative``), or a loaded AOI.

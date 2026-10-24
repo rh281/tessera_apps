@@ -67,7 +67,12 @@ lessons (validation semantics, memory):
   reference is loaded before any chunk read; when Hansen cannot be reached, or holds no land pixel
   over the AOI (its tiles were not found, or the AOI is water), the run completes with a warning
   (or stops early under ``strict_validate``), and an identical validating rerun redoes only the
-  validation, from the outputs on disk.
+  validation, from the outputs on disk. ``validate`` and ``reference`` shape nothing but the
+  validation, the report's validation fields and the loss outline drawn on the preview, so they
+  are kept out of the arguments digest, in a validation digest of their own: adding, changing or
+  removing ``reference``, or adding ``validate``, to a finished run redoes the validation from the
+  outputs on disk without reading a chunk, and redraws the preview from them. The Hansen version,
+  its tile template and ``forest_cover`` also set the labels, so they stay in the arguments digest.
 """
 
 from __future__ import annotations
@@ -107,6 +112,7 @@ from tessera_apps.apps._common import (
     prepare_run,
     spread_indices,
     stride_for_preview,
+    validation_failure_on_record,
     zone_values_from_raster,
 )
 from tessera_apps.export import GridArray, OutputPaths
@@ -1486,8 +1492,17 @@ def run_deforest(
     ``deforest_labels.parquet`` (every sampled label: where it is, its class, source chunk, radar
     regime, whether it was used and its held-out fold), ``deforest_preview.png``,
     ``deforest_validation.json`` when validating, and ``deforest_report.json`` last. A rerun with
-    the same arguments skips (``skipped``) unless ``force``; a validating rerun whose outputs are
-    current except ``validation.json`` redoes only the validation, from the outputs on disk.
+    the same arguments skips (``skipped``) unless ``force``. ``validate`` and ``reference`` are not
+    in the arguments digest but in a validation digest of their own
+    (:func:`~tessera_apps.export.validation_args_digest`): they shape only ``validation.json``, the
+    report's validation fields and the loss outline on the preview. So a validating rerun whose
+    other outputs are current and whose ``reference`` differs from the one the report records, or
+    whose ``validation.json`` is missing or not vouched for, redoes only the validation, from the
+    outputs on disk, without reading a chunk (``validation_redone``), and redraws the preview from
+    those outputs, byte for byte what a full run with these arguments draws. A rerun that asks for
+    no validation skips when the other outputs are current, and its report still vouches for the
+    validation an earlier run wrote, under that run's validation digest. A report written before the
+    validation digest existed is never current for a validating rerun: that rerun is a full run.
 
     Args:
         aoi: AOI file (any CRS), demo name (``rondonia``) or a loaded AOI.
@@ -1575,7 +1590,6 @@ def run_deforest(
         "min_area_ha": min_area_ha,
         "hansen_version": hansen_version,
         "hansen_url_template": template,
-        "reference": None if ref_path is None else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
         "block": list(block),
         "method": {
             "min_labels_per_class": MIN_LABELS_PER_CLASS,
@@ -1605,6 +1619,12 @@ def run_deforest(
         strict_validate=strict_validate,
         max_zones=max_zones,
     )
+    # The reference shapes only the validation, the report's validation fields and the outline on the
+    # preview, so it is kept out of the arguments digest: changing it redoes the validation from the
+    # outputs on disk. Hansen as the reference is covered by the arguments digest (it sets the labels).
+    validation_params = {
+        "reference": None if ref_path is None else {"file": ref_path.name, "sha256": export.file_sha256(ref_path)},
+    }
     state = _State()
     ctx = prepare_run(
         APP,
@@ -1632,6 +1652,7 @@ def run_deforest(
             plan, block=block, ring_km=None if labels_frame is not None else label_ring_km
         ),
         allow_validation_only=True,
+        validation_params=validation_params,
         preflight=lambda c: _preflight(c, state, opts),
     )
     if ctx is None:
@@ -2581,13 +2602,7 @@ def _run(ctx: RunContext, state: _State, opts: _Options) -> DeforestResult:
     export.write_table(summary_table, ctx.paths.summary_parquet.with_suffix(""))
     _write_labels(ctx.extra_outputs["labels"], table, ctx.aoi.geometry, source)
     step = stride_for_preview(mosaic.data.shape[1:])
-    ref_image = None
-    if state.ref.window is not None:
-        ref_mosaic, _, _ = export.mosaic_zones(
-            [GridArray(state.ref.window[z.zone], z) for z in plan.zones], dst_zone=dst, nodata=export.BOOL_NODATA
-        )
-        ref_image = ref_mosaic[::step, ::step].copy()
-        del ref_mosaic
+    ref_image = None if state.ref.window is None else _reference_image(plan, state.ref.window, dst, step)
     _write_preview(
         ctx.paths.preview,
         prob_a=mosaic.data[0, ::step, ::step],
@@ -2719,11 +2734,17 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> Deforest
     """Redo only the validation of a run whose other outputs are current, without reading a chunk.
 
     The conversion, the classified pixels and the ``year_a`` forest map come back from the run's
-    GeoTIFF (:func:`zone_values_from_raster`). When the reference still cannot be loaded, nothing is
-    written and the run counts as skipped.
+    GeoTIFF (:func:`zone_values_from_raster`), and the preview is redrawn from the outputs on disk
+    (:func:`_redraw_preview`), with this validation's loss outline. When the reference cannot be
+    loaded and the earlier report already records these validation inputs as not done
+    (:func:`validation_failure_on_record`: the same command, whose reference still fails), nothing
+    is written and the run counts as skipped: the earlier report stands. Otherwise the earlier
+    validation file is removed first, so with a reference that cannot be loaded the redo leaves
+    what a full run with these arguments leaves: no validation file, the error in
+    ``summary.validation``, a :data:`VALIDATION_SKIPPED` warning and a preview without an outline.
     """
     previous = json.loads(ctx.paths.report.read_text(encoding="utf-8"))
-    if state.ref.window is None:
+    if state.ref.window is None and validation_failure_on_record(ctx, previous):
         logger.warning(
             "%s: outputs in %s are current; the validation reference still cannot be loaded (%s), so nothing "
             "was redone.",
@@ -2738,6 +2759,8 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> Deforest
             skipped=True,
             validation_written=False,
         )
+    # As a full run's begin_run does: no earlier validation file stays behind this one.
+    ctx.paths.validation.unlink(missing_ok=True)
     plan = ctx.plan
     summary = dict(previous.get("summary") or {})
     state.label_info = dict(summary.get("labels") or {})
@@ -2770,6 +2793,8 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> Deforest
     summary["validation"] = validation
     cross["removed_by_hansen_loss"] = validation.get("cross_check_removed")
     summary["cross_check"] = cross
+    summary["hansen"] = {**dict(summary.get("hansen") or {}), "validation": opts.reference is None}
+    _redraw_preview(ctx, state, opts, summary)
     old = [w for w in previous.get("warnings") or [] if not str(w).startswith(VALIDATION_SKIPPED)]
     report = finish_validation_only(
         ctx, previous, summary=summary, warnings=[*old, *ctx.warnings], validation_written=written
@@ -2787,6 +2812,51 @@ def _redo_validation(ctx: RunContext, state: _State, opts: _Options) -> Deforest
 # --------------------------------------------------------------------------------------------
 # Preview
 # --------------------------------------------------------------------------------------------
+
+
+def _reference_image(plan: AOIPlan, masks: Mapping[str, np.ndarray], dst: str, step: int) -> np.ndarray:
+    """The reference loss mask mosaicked onto ``dst`` and strided for the preview."""
+    ref_mosaic, _, _ = export.mosaic_zones(
+        [GridArray(masks[z.zone], z) for z in plan.zones], dst_zone=dst, nodata=export.BOOL_NODATA
+    )
+    return ref_mosaic[::step, ::step].copy()
+
+
+def _redraw_preview(ctx: RunContext, state: _State, opts: _Options, summary: Mapping[str, Any]) -> None:
+    """Redraw the preview of a validation redo from the outputs on disk, as a full run draws it.
+
+    A full run draws the reference loss outline over its conversion panel, so a redo against
+    another reference redraws the preview. Every other input comes back unchanged: the four bands
+    from the run's GeoTIFF (read whole, then strided as the run strides its mosaic), and the cut,
+    the patch sizes and the classifier scores from the report's summary (the patch histogram in
+    bin order: the report is written with sorted keys). With the same reference the file is byte
+    for byte a full run's.
+    """
+    plan = ctx.plan
+    dst = max(plan.zones, key=lambda z: z.n_pixels).zone
+    with rasterio.open(ctx.paths.tif) as ds:
+        data = ds.read()
+    step = stride_for_preview(data.shape[1:])
+    patches = dict(summary.get("patches") or {})
+    hist = dict(patches.get("histogram") or {})
+    patches["histogram"] = {
+        k: hist[k] for k in [*PATCH_BIN_LABELS, *sorted(set(hist) - set(PATCH_BIN_LABELS))] if k in hist
+    }
+    _write_preview(
+        ctx.paths.preview,
+        prob_a=data[0, ::step, ::step],
+        prob_b=data[1, ::step, ::step],
+        dist=data[2, ::step, ::step],
+        converted=data[3, ::step, ::step],
+        reference=None if state.ref.window is None else _reference_image(plan, state.ref.window, dst, step),
+        cut=(summary.get("cross_check") or {}).get("cut"),
+        patches=patches,
+        classifier=dict(summary.get("classifier") or {}),
+        year_a=ctx.year_a,
+        year_b=ctx.year_b,
+        forest_prob=opts.forest_prob,
+    )
+    del data
 
 
 def _write_preview(

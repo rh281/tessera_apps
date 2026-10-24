@@ -6,19 +6,23 @@ name, and an existing output stays intact until its replacement is complete.
 
 Per-pixel results live on :class:`~tessera_apps.io.ZonePlan` grids, one per UTM zone. A multi-zone
 AOI is joined into one raster with :func:`mosaic_zones`, which takes each ground pixel from its
-nominal zone only. :func:`provenance_record`, :func:`run_args_digest` and :func:`outputs_current`
-give the reproducibility block and the skip-if-current rule every app report follows (survey S19).
-An app run goes:
+nominal zone only. :func:`provenance_record`, :func:`run_args_digest`, :func:`validation_args_digest`
+and :func:`outputs_current` give the reproducibility block and the skip-if-current rule every app
+report follows (survey S19). An app run goes:
 
-1. ``digest = run_args_digest(...)``; skip the run if ``outputs_current(paths, digest, ...)``.
+1. ``digest = run_args_digest(...)`` over every input that shapes the tif, the tables or the rest of
+   the outputs, and ``vdigest = validation_args_digest(...)`` over the inputs that shape only the
+   validation; skip the run if ``outputs_current(paths, digest, ..., validation_digest=vdigest)``.
 2. :func:`begin_run` removes the previous run's report and ``validation.json``.
 3. Write the tif, summary tables and preview, then ``validation.json`` when the run validates.
-4. Write ``report.json`` last, with ``"args_digest"`` and ``"outputs": outputs_record(...)``.
+4. Write ``report.json`` last, with ``"args_digest"``, ``"validation_digest"`` (None unless the
+   report vouches for ``validation.json``) and ``"outputs": outputs_record(...)``.
 
 A rerun then skips only when every output exists, none is newer than the report, the report records
 the same argument digest, and every output the report lists still has the sha256 it recorded. A run
-that needs ``validation.json`` also needs the report to list it, so a validation file left by an
-earlier run with other arguments is never taken as this run's.
+that needs ``validation.json`` also needs the report to list it and to record the same validation
+digest, so a validation file left by an earlier run with other arguments, or scored against other
+validation inputs, is never taken as this run's.
 """
 
 from __future__ import annotations
@@ -885,6 +889,18 @@ def run_args_digest(
     )
 
 
+def validation_args_digest(params: Mapping[str, Any]) -> str:
+    """The digest of a run's validation inputs, recorded in ``report.json`` as ``"validation_digest"``.
+
+    It covers the inputs that shape only ``validation.json`` and the report's validation fields
+    (reference files by name and sha256, reference sources and their options), never an input that
+    shapes another output: those belong in :func:`run_args_digest`. :func:`outputs_current` compares
+    it only for a run that needs ``validation.json``, so a rerun whose run digest matches and whose
+    validation digest differs can redo only the validation, from the outputs on disk.
+    """
+    return args_digest({"validation": dict(params)})
+
+
 @dataclasses.dataclass(frozen=True)
 class OutputPaths:
     """The files one app run writes (brief section 4)."""
@@ -972,7 +988,9 @@ def begin_run(paths: OutputPaths) -> tuple[Path, ...]:
     return tuple(removed)
 
 
-def outputs_current(paths: OutputPaths, digest: str, *, need_validation: bool) -> bool:
+def outputs_current(
+    paths: OutputPaths, digest: str, *, need_validation: bool, validation_digest: str | None = None
+) -> bool:
     """Whether a previous run already wrote these outputs with the same arguments.
 
     True only when all of these hold:
@@ -984,16 +1002,26 @@ def outputs_current(paths: OutputPaths, digest: str, *, need_validation: bool) -
       replacing some outputs but before its report;
     - every required output listed in the report's ``"outputs"`` (from :func:`outputs_record`) still
       has the sha256 recorded there;
-    - with ``need_validation``, the report lists ``"validation"``. ``validation.json`` is the one
+    - with ``need_validation``, the report lists ``"validation"`` and records
+      ``"validation_digest": validation_digest`` at the top level. ``validation.json`` is the one
       output a run may leave unwritten, so only the report's own hash ties it to ``digest``: a file
       left by an earlier run with other arguments, or by a run whose reference fetch failed, does
-      not count.
+      not count; and only the recorded validation digest ties it to the validation inputs, so a
+      file scored against another reference does not count either. A report written before the
+      validation digest existed records none, so it is never current for a run that validates.
 
     Args:
         paths: From :func:`output_paths`.
         digest: From :func:`run_args_digest` for this run.
         need_validation: Whether this run must also have ``validation.json``.
+        validation_digest: From :func:`validation_args_digest` for this run; required with
+            ``need_validation``.
+
+    Raises:
+        ValueError: ``need_validation`` without a ``validation_digest``.
     """
+    if need_validation and validation_digest is None:
+        raise ValueError("outputs_current needs the validation digest of a run that validates.")
     required = paths.required(need_validation=need_validation)
     if not all(p.is_file() for p in required):
         return False
@@ -1016,7 +1044,7 @@ def outputs_current(paths: OutputPaths, digest: str, *, need_validation: bool) -
         hashes = {}
     if not isinstance(hashes, dict):
         return False
-    if need_validation and "validation" not in hashes:
+    if need_validation and ("validation" not in hashes or report.get("validation_digest") != validation_digest):
         return False
     for field in dataclasses.fields(paths):
         path = getattr(paths, field.name)
