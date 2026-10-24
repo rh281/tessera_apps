@@ -914,3 +914,129 @@ Item 2 stays open until a 2019 or 2020 planting is available.
 - **The install cell.** It takes `tessera_apps` from GitHub `main`, because 0.1.0 on PyPI predates the geotessera reader, and the repository is private. At release it becomes `tessera_apps>=0.2` and the notebook is re-run.
 - **Section 9's classifier cell** ends with the fitted model, so it saves scikit-learn's large HTML display. That goes in the same re-run.
 - **Bug reports.** Section 15 sends notebook bugs to `dClimate/tessera-embeddings`, where the notebook came from. The owner should decide whether they go there or to `rh281/tessera_apps`.
+
+## 0.2.0, checkpoint E: the release, ready for its tag (2026-10-24)
+
+**0.2.0 is ready on `main` and is not published.** The version is 0.2.0, the changelog has its section, and CI and a trial run of the release workflow pass. No tag was pushed; the owner creates it (below).
+
+### Built
+
+- **Version 0.2.0** (`src/tessera_apps/__init__.py`), with a `## 0.2.0` section in `CHANGELOG.md`:
+  - **Changed:** the geotessera reader; validation numbers that still use the 0.1.0 stand-ins (item 1 blocked); restore demos that are still synthetic, and why (item 2); notebook 00.
+  - **Fixed:** five bugs.
+  - **Known limitations:** updated. The two fixed items are gone: the missing notebook 00 and the null geotessera entry. The wildfire memory line is corrected, and the new limitations are added.
+- **Validation-only reruns,** the fix the handoff welcomed but did not require. In `wildfire`, `deforest` and `wetland`:
+  - the validation inputs left the run's arguments digest for a validation digest of their own;
+  - a rerun that adds, changes or removes one of them redoes only the validation, from the outputs on disk, and reads no chunk;
+  - the redo rewrites the validation file and redraws the preview's reference outline.
+
+  The map, the tables and the other files stay byte for byte. `restore` keeps the full rerun: its canopy check fills summary table columns and a preview panel from target pixels that no output records. The README lists each app's validation inputs.
+- **`docs/upstream-pointer.md`** has two texts, both saying the package reads through geotessera with the v1.1 dClimate store:
+  - a ready-to-paste paragraph for the dClimate/tessera-embeddings README, with where it goes (line 47 at `3b13965`);
+  - a one-line table row for the ucam-eo/geotessera-examples README ("Where next", after line 32 at `a4ca84b`).
+
+  Both link to PyPI, since the repository is private.
+- **`docs/releasing.md`** now describes the release as 0.1.0 actually went:
+  - the release and its tag were made in the web UI, and the notes are pasted into it;
+  - the `invalid-publisher` fix (repository `tessera_apps`, with an underscore);
+  - the github-release job attaches the dists to an existing release.
+- **Notebook 00:**
+  - it now installs `tessera_apps>=0.2`, not the private GitHub URL;
+  - section 9 no longer saves scikit-learn's 50 KB model display;
+  - section 11.2 adds a fourth difference of the Source Coop copy: `time` holds int32 years there, checked live.
+
+  It was re-run. Notebooks 02 and 03 had one markdown sentence each that called 0.1.0's memory estimate "the app's own"; both now give 0.2.0's estimates beside 0.1.0's.
+
+### Numbers: the checkpoint answer
+
+| Check | Result |
+|---|---|
+| `pytest` offline (AWS_* unset) | 1,218 passed in 754 s |
+| `pytest -m network` | 8 passed, 4 failed: NIFC, EFFIS, Zenodo (GMW) and USFS still answer 403 at this environment's proxy, as at checkpoint A. Not green, and it cannot be from here. |
+| ruff check, ruff format --check, mypy on src tests scripts | clean (44 files) |
+| CI on `9830848`, Python 3.12 and 3.13 | passed (run 20) |
+| Trial release workflow (`workflow_dispatch`, testpypi off) on `9830848` | passed (release run 4): CI on 3.12 and 3.13, the version and notes from `## 0.2.0`, build, `check_dist`, `twine check`, a clean install of the wheel with dependencies from PyPI, and the offline tests against the installed wheel; publish, testpypi and github-release skipped, as a dry run should |
+| Fresh build | wheel 310,415 B, sdist 5,258,426 B; `check_dist.py --version 0.2.0` OK; `twine check --strict` passed |
+
+**Validation-only reruns, measured live** at snapshot `RC6FS07ZB0T76EXT8XRG` with every AWS_* variable unset:
+
+| Run | Chunk bytes read | Wall time |
+|---|---|---|
+| Rondonia deforest, no `--validate` | 1,550,387,529 | 78.9 s |
+| the same, then with `--validate` | 0 | 31.2 s, mostly Hansen tile reads |
+| Caldor, a 3 km window (900 ha), plain | 339,589,746 | 27.5 s |
+| then with `--validate --reference` (the Hansen 2021 outline cut to the window) | 0 | 4.1 s |
+| then with `--severity` added | 0 | 3.7 s |
+
+The Rondonia redo's preview and scores equal checkpoint A's full validating run: preview sha256 `c40ec3ed`, IoU 0.657, F1 0.793. On the Caldor window, a fresh full run with the final arguments wrote the same tif, PCA COGs, tables and preview, byte for byte, and the same scores (outline IoU 0.580, severity IoU 0.605). A full run's output bytes are unchanged: the code before this change wrote the same files.
+
+**Notebook 00, re-run for the release:** 147 s, 2,623,829 B, 0 error outputs, 0 dashes, snapshot `6GMNA06TNMFHHMCB9ZW0`. Its printed values are checkpoint D's, except the timings: 32.3 MB for the 5.4 cell, and `read_region` equal to `read_bbox`.
+
+### How it was checked
+
+**The workflow.** Three agents built in two steps:
+- the validation rerun fix and the notebook, in parallel (the notebook ran from a wheel built at the start, so the concurrent code changes could not reach it);
+- then the release documents, written from the fix's report.
+
+Three lenses reviewed the result: the rerun change, the honesty of the documents, and the release mechanics with the notebook. Each finding went to a skeptic who tried to refute it. All 13 survived (9 confirmed, 4 partly) and were fixed. The most important:
+- a validation rerun whose new reference could not load skipped, and the report went on vouching for the old reference's scores;
+- the documents described the validation redo as new, when 0.1.0 already did it for `--validate` alone;
+- the docs named the wrong trigger for the 0.1.0 bug the redo fixes.
+
+**Tests and mutants.** Each app's add, change and remove sequence is tested offline with the chunk-key log. Each asserts:
+- zero new chunk keys;
+- the map and tables unchanged;
+- a preview identical to a fresh full run's, including across a UTM zone seam;
+- the full run's scores;
+- a skip on the next rerun.
+
+Twenty-three mutants were made on scratch copies: misfiled parameters, a missing digest check, an old-format report allowed to redo, no preview redraw, a reference compared by name only, and others. Every one made a test fail.
+
+**The lead's own checks before committing:**
+- dashes in every changed file;
+- the three changed notebooks, for errors, dashes, local paths and the install line;
+- ruff, mypy, and the version and changelog tests;
+- then, after the push, the full offline suite and the network tier.
+
+### Surprises
+
+- **0.1.0 shipped three validation-redo bugs:**
+  - a redo left the preview without the reference outline that a full run draws;
+  - `deforest` left `summary.hansen.validation` false after a redo;
+  - adding `--validate` while the reference could not load skipped without recording the error.
+
+  All three are fixed and listed under "Fixed".
+- **The preview is part of the validation:** every app draws the reference outline on it. A literal reading of "anything that shapes the preview stays in the digest" would have kept `--validate` in it. So the redo redraws the preview instead, and tests hold it to a full run's bytes.
+- **Across a UTM zone seam,** a redone validation scores from the mosaic on disk, so a few seam pixels may score differently from a full run. The validation file and the README say so.
+- **The version bump alone turned `main` red** for about three and a half hours (`4bc5c49`). A test requires a changelog section for the version. Bump the version and the changelog in one commit.
+- **The store's head moved again,** to `6GMNA06TNMFHHMCB9ZW0`: five heads between 2026-10-14 and 2026-10-23, now in the README's `--snapshot` row.
+
+### What should change next
+
+- **Items 1 and 2** need the hosts listed in checkpoint C allowed, or another machine. Item 2 also needs a 2019 or 2020 planting.
+- **File** `docs/geotessera-upstream-issue.md` at ucam-eo/geotessera. With snapshot pinning and a store hook in geotessera, the reads can move onto `GeoTesseraZarr` itself.
+- **A validation-only redo for `restore`** would need the canopy check's target pixels saved with the outputs.
+- **Re-run notebooks 01 to 04 under 0.2.0** when the cost is worth it (about 30 GB of reads). Their results are unchanged, but they print 0.1.0's version, timings and memory estimates.
+- **Checkpoint 8** of the brief (the Streamlit demo and Dockerfile) is next.
+
+### What is left for the owner to publish 0.2.0
+
+Nothing needs setting up again: the trusted publisher (repository `tessera_apps`, workflow `release.yml`, environment `pypi`) became a normal publisher with 0.1.0. The repository stays private, so the workflow warns and goes ahead.
+
+1. **Create the release from the web UI,** as for 0.1.0:
+   - *Releases*, *Draft a new release*;
+   - tag `v0.2.0`, *Create new tag on publish*, target `main`;
+   - title `tessera_apps 0.2.0`;
+   - paste the `## 0.2.0` section of `CHANGELOG.md`, without its heading, as the description;
+   - *Publish release*.
+
+   This is one-way: 0.2.0 can never be reused on PyPI.
+2. **Watch the run** in the Actions tab. If `publish` fails, fix the setup and use *Re-run failed jobs*. Once PyPI has any 0.2.0 file, never move the tag.
+3. **Check from a clean Python 3.12 venv** with no AWS_* variables:
+   - `pip install tessera_apps==0.2.0`;
+   - `tessera-apps --version` prints `tessera-apps 0.2.0`;
+   - `tessera-apps info` shows `"dataset": "1.1-dclimate"`.
+4. **Then:**
+   - send the two texts in `docs/upstream-pointer.md` to the dClimate and geotessera-examples maintainers;
+   - file the drafted geotessera issue;
+   - decide where notebook 00's bug reports go (checkpoint D).
