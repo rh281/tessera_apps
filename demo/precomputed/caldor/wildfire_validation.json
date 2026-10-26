@@ -1,0 +1,318 @@
+{
+ "caveats": [
+  "Scores count AOI pixels valid in both years with the same radar regime, in every zone the AOI touches; pixels outside the AOI are never classified, so the AOI should extend past the scar.",
+  "A filled outline or perimeter reference includes unburned islands, so a pixel-level burned mask has an IoU ceiling below 1 against it.",
+  "Reference: the file hansen2021_outline.geojson (sha256 d096b2440cc311d3a3a64b8c12a7db236ef13bac17f3fa46345db5cfb09f2176), supplied with --reference.",
+  "This reference appears to be derived from Hansen Global Forest Change loss, which records stand-replacing forest loss, not burn severity: low-severity burn and burned non-forest are not in it, and Hansen is itself a 30 m model.",
+  "MTBS sets its dNBR class thresholds per fire, by analyst judgement; a dNBR proxy with generic thresholds is cruder, so the severity class boundaries are approximate.",
+  "The severity classes are 30 m (MTBS) or 20 m (Sentinel-2) pixels read onto the 10 m grid by nearest resampling, so class edges are blocky against the 10 m burned mask and bound the IoU below 1 along every edge.",
+  "Pixels the severity map does not cover (outside its extent or on its nodata) and class 6 (non-processing) are excluded from every severity score and counted under excluded. Background (class 0, outside the mapped burn) and increased greenness (class 5) are never burned classes: they are scored as unburned land in the binary scores, so detections there count as false positives, and each has its own detection rate.",
+  "Severity reference: the file caldor_s2_dnbr6.tif (sha256 1ce333dee3236a4c270ea4693d7e222ed57073c0a915077dfb7dd01d1f9b919f), supplied with --severity.",
+  "The severity map carries TESSERA_APPS_SOURCE=sentinel2_dnbr: it is the Sentinel-2 dNBR proxy written by scripts/make_caldor_dnbr.py, not MTBS. Its classes come from generic Key and Benson thresholds on a median-offset dNBR of 20 m Sentinel-2 composites, not from an analyst's per-fire thresholds."
+ ],
+ "reference": {
+  "file": "hansen2021_outline.geojson",
+  "hansen_derived": true,
+  "severity": {
+   "codes": {
+    "0": "background",
+    "1": "unburned to low",
+    "2": "low",
+    "3": "moderate",
+    "4": "high",
+    "5": "increased greenness",
+    "6": "non-processing"
+   },
+   "crs": "EPSG:32610",
+   "file": "caldor_s2_dnbr6.tif",
+   "nodata": 255.0,
+   "proxy": true,
+   "resolution": [
+    20.0,
+    20.0
+   ],
+   "sha256": "1ce333dee3236a4c270ea4693d7e222ed57073c0a915077dfb7dd01d1f9b919f",
+   "source_tag": "sentinel2_dnbr",
+   "tags": {
+    "TESSERA_APPS_AOI": "caldor.geojson feature 0 (sha256 c58689e50d36b86afe16bf34030a17e5cbc3b43dc8764e7ac2c67e19cab37640)",
+    "TESSERA_APPS_BUCKET": "https://sentinel-cogs.s3.us-west-2.amazonaws.com/sentinel-s2-l2a-cogs",
+    "TESSERA_APPS_CODES": "{\"0\": \"background (not used: pixels outside the AOI are nodata, 255)\", \"1\": \"unburned to low\", \"2\": \"low\", \"3\": \"moderate\", \"4\": \"high\", \"5\": \"increased greenness\", \"6\": \"non-processing (no clear observation in a period)\"}",
+    "TESSERA_APPS_DNBR_OFFSET": "-0.013336",
+    "TESSERA_APPS_NBR": "median over dates of (B8A - B12) / (B8A + B12) on clear pixels, per period",
+    "TESSERA_APPS_NODATA": "255: outside the AOI, not mapped",
+    "TESSERA_APPS_OFFSET_REGION": "median dNBR of AOI pixels outside caldor.geojson feature 1 (Hansen 2021 loss outline) buffered by 2000 m",
+    "TESSERA_APPS_POST_PERIOD": "2022-06-15/2022-08-31",
+    "TESSERA_APPS_POST_SCENES": "[\"S2B_10SGH_20220615_0_L2A\", \"S2B_10SGJ_20220615_0_L2A\", \"S2A_10SGH_20220630_0_L2A\", \"S2A_10SGJ_20220630_0_L2A\", \"S2A_10SGH_20220710_0_L2A\", \"S2A_10SGJ_20220710_0_L2A\", \"S2A_10SGH_20220812_0_L2A\", \"S2A_10SGJ_20220812_0_L2A\", \"S2B_10SGH_20220814_0_L2A\", \"S2B_10SGJ_20220814_0_L2A\", \"S2A_10SGH_20220822_0_L2A\", \"S2A_10SGJ_20220822_0_L2A\", \"S2B_10SGH_20220824_0_L2A\", \"S2B_10SGJ_20220824_0_L2A\", \"S2B_10SGH_20220827_0_L2A\", \"S2B_10SGJ_20220827_0_L2A\"]",
+    "TESSERA_APPS_PRE_PERIOD": "2021-06-15/2021-08-10",
+    "TESSERA_APPS_PRE_SCENES": "[\"S2A_10SGH_20210615_1_L2A\", \"S2A_10SGJ_20210615_1_L2A\", \"S2B_10SGH_20210620_1_L2A\", \"S2B_10SGJ_20210620_1_L2A\", \"S2A_10SGH_20210628_1_L2A\", \"S2A_10SGJ_20210628_1_L2A\", \"S2A_10SGH_20210715_1_L2A\", \"S2A_10SGJ_20210715_1_L2A\", \"S2B_10SGH_20210723_1_L2A\", \"S2B_10SGJ_20210723_1_L2A\", \"S2A_10SGH_20210804_1_L2A\", \"S2A_10SGJ_20210804_1_L2A\", \"S2A_10SGH_20210807_1_L2A\", \"S2A_10SGJ_20210807_1_L2A\", \"S2B_10SGH_20210809_1_L2A\", \"S2B_10SGJ_20210809_1_L2A\"]",
+    "TESSERA_APPS_REFLECTANCE": "DN * 1e-4, minus 0.1 when processing baseline >= 04.00 and the clear-pixel B12 1st percentile is at least 1000 DN (the item's earthsearch:boa_offset_applied flag is wrong in this bucket)",
+    "TESSERA_APPS_SCL_CLEAR": "4,5",
+    "TESSERA_APPS_SCRIPT": "scripts/make_caldor_dnbr.py",
+    "TESSERA_APPS_SOURCE": "sentinel2_dnbr",
+    "TESSERA_APPS_THRESHOLDS": "{\"increased_greenness_below\": -100, \"low_from\": 100, \"moderate_from\": 270, \"high_from\": 660, \"scale\": \"round(1000 * dNBR)\", \"method\": \"Key and Benson\"}",
+    "TESSERA_APPS_TILES": "10SGH,10SGJ",
+    "TESSERA_APPS_WINDOWS": "{\"S2A_10SGH_20210615_1_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20210615_1_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20210620_1_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20210620_1_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20210628_1_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20210628_1_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20210715_1_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20210715_1_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20210723_1_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20210723_1_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20210804_1_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20210804_1_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20210807_1_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20210807_1_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20210809_1_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20210809_1_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20220615_0_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20220615_0_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20220630_0_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20220630_0_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20220710_0_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20220710_0_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20220812_0_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20220812_0_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20220814_0_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20220814_0_L2A\": [67, 4489, 3411, 1001], \"S2A_10SGH_20220822_0_L2A\": [67, 0, 3411, 1676], \"S2A_10SGJ_20220822_0_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20220824_0_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20220824_0_L2A\": [67, 4489, 3411, 1001], \"S2B_10SGH_20220827_0_L2A\": [67, 0, 3411, 1676], \"S2B_10SGJ_20220827_0_L2A\": [67, 4489, 3411, 1001]}"
+   }
+  },
+  "sha256": "d096b2440cc311d3a3a64b8c12a7db236ef13bac17f3fa46345db5cfb09f2176",
+  "source": "file"
+ },
+ "scores": {
+  "burned": {
+   "accuracy": 0.9057650434378287,
+   "f1": 0.7844228528892119,
+   "fn": 2290734,
+   "fp": 346393,
+   "iou": 0.6453089832707419,
+   "n": 27984594,
+   "precision": 0.9326642256307219,
+   "recall": 0.676842763844226,
+   "tn": 20549596,
+   "tp": 4797871
+  },
+  "burned_outside_reference_fraction": 0.0673357743692781,
+  "iou_below_0_6": false,
+  "per_zone": {
+   "10N": {
+    "accuracy": 0.8949676009905934,
+    "f1": 0.7826699983695053,
+    "fn": 2257543,
+    "fp": 332298,
+    "iou": 0.6429398744146577,
+    "n": 24657544,
+    "precision": 0.9334830890295078,
+    "recall": 0.6738096301122233,
+    "tn": 17404309,
+    "tp": 4663394
+   },
+   "11N": {
+    "accuracy": 0.9857874092664672,
+    "f1": 0.8504743232987604,
+    "fn": 33191,
+    "fp": 14095,
+    "iou": 0.739848043881318,
+    "n": 3327050,
+    "precision": 0.9051301725762593,
+    "recall": 0.8020433237111434,
+    "tn": 3145287,
+    "tp": 134477
+   }
+  },
+  "recall_inside_reference": 0.6768385626090387,
+  "reference_pixels": 7088649,
+  "reference_pixels_unclassified": 44,
+  "severity": {
+   "burned_pixels": 5144264,
+   "classes": {
+    "0": {
+     "detected_hectares": 0.0,
+     "detected_pixels": 0,
+     "detection_rate": null,
+     "hectares": 0.0,
+     "name": "background",
+     "pixels": 0
+    },
+    "1": {
+     "detected_hectares": 511.78000000000003,
+     "detected_pixels": 51178,
+     "detection_rate": 0.0026601828715888697,
+     "hectares": 192385.27,
+     "name": "unburned to low",
+     "pixels": 19238527
+    },
+    "2": {
+     "detected_hectares": 2436.19,
+     "detected_pixels": 243619,
+     "detection_rate": 0.09702538433751687,
+     "hectares": 25108.79,
+     "name": "low",
+     "pixels": 2510879
+    },
+    "3": {
+     "detected_hectares": 27740.87,
+     "detected_pixels": 2774087,
+     "detection_rate": 0.7750483062903787,
+     "hectares": 35792.44,
+     "name": "moderate",
+     "pixels": 3579244
+    },
+    "4": {
+     "detected_hectares": 20673.16,
+     "detected_pixels": 2067316,
+     "detection_rate": 0.9964625443748478,
+     "hectares": 20746.55,
+     "name": "high",
+     "pixels": 2074655
+    },
+    "5": {
+     "detected_hectares": 27.93,
+     "detected_pixels": 2793,
+     "detection_rate": 0.01230401896043595,
+     "hectares": 2269.9900000000002,
+     "name": "increased greenness",
+     "pixels": 226999
+    }
+   },
+   "detections_by_class": {
+    "0": {
+     "pixels": 0,
+     "share": 0.0
+    },
+    "1": {
+     "pixels": 51178,
+     "share": 0.009948556294933542
+    },
+    "2": {
+     "pixels": 243619,
+     "share": 0.04735740622954032
+    },
+    "3": {
+     "pixels": 2774087,
+     "share": 0.5392582884548693
+    },
+    "4": {
+     "pixels": 2067316,
+     "share": 0.4018681778384624
+    },
+    "5": {
+     "pixels": 2793,
+     "share": 0.0005429348104996167
+    },
+    "6": {
+     "pixels": 5212,
+     "share": 0.0010131672869044047
+    },
+    "unmapped": {
+     "pixels": 59,
+     "share": 1.1469084790360681e-05
+    }
+   },
+   "excluded": {
+    "non_processing_pixels": 348854,
+    "unmapped_pixels": 5436
+   },
+   "iou_below_0_6": false,
+   "low_or_worse": {
+    "accuracy": 0.8865836944826955,
+    "f1": 0.7644482154721395,
+    "fn": 3079756,
+    "fp": 53971,
+    "iou": 0.6187099764209857,
+    "n": 27630304,
+    "precision": 0.9894977479050857,
+    "recall": 0.6227997870854541,
+    "tn": 19411555,
+    "tp": 5085022
+   },
+   "min_class": 3,
+   "min_class_name": "moderate",
+   "min_class_or_worse": {
+    "accuracy": 0.959823605270503,
+    "f1": 0.8971465664624458,
+    "fn": 812496,
+    "fp": 297590,
+    "iou": 0.8134776019917033,
+    "n": 27630304,
+    "precision": 0.9420917677840775,
+    "recall": 0.8562945676956734,
+    "tn": 21678815,
+    "tp": 4841403
+   },
+   "moderate_or_worse": {
+    "accuracy": 0.959823605270503,
+    "f1": 0.8971465664624458,
+    "fn": 812496,
+    "fp": 297590,
+    "iou": 0.8134776019917033,
+    "n": 27630304,
+    "precision": 0.9420917677840775,
+    "recall": 0.8562945676956734,
+    "tn": 21678815,
+    "tp": 4841403
+   },
+   "per_zone": {
+    "low_or_worse": {
+     "10N": {
+      "accuracy": 0.8755658327674817,
+      "f1": 0.7652718598592804,
+      "fn": 2974354,
+      "fp": 53935,
+      "iou": 0.6197897617949032,
+      "n": 24336475,
+      "precision": 0.9891922945979909,
+      "recall": 0.6240154016514049,
+      "tn": 16371700,
+      "tp": 4936486
+     },
+     "11N": {
+      "accuracy": 0.967989230770632,
+      "f1": 0.7380487441305806,
+      "fn": 105402,
+      "fp": 36,
+      "iou": 0.5848472678305653,
+      "n": 3293829,
+      "precision": 0.9997576932396414,
+      "recall": 0.5849301798076696,
+      "tn": 3039855,
+      "tp": 148536
+     }
+    },
+    "min_class_or_worse": {
+     "10N": {
+      "accuracy": 0.955570517094197,
+      "f1": 0.8968166287097462,
+      "fn": 789700,
+      "fp": 291557,
+      "iou": 0.8129352309406671,
+      "n": 24336475,
+      "precision": 0.9415766725893466,
+      "recall": 0.8561190140080356,
+      "tn": 18556354,
+      "tp": 4698864
+     },
+     "11N": {
+      "accuracy": 0.9912475723542419,
+      "f1": 0.9081606972765819,
+      "fn": 22796,
+      "fp": 6033,
+      "iou": 0.831771392558704,
+      "n": 3293829,
+      "precision": 0.9593934254099022,
+      "recall": 0.8621223576375238,
+      "tn": 3122461,
+      "tp": 142539
+     }
+    },
+    "moderate_or_worse": {
+     "10N": {
+      "accuracy": 0.955570517094197,
+      "f1": 0.8968166287097462,
+      "fn": 789700,
+      "fp": 291557,
+      "iou": 0.8129352309406671,
+      "n": 24336475,
+      "precision": 0.9415766725893466,
+      "recall": 0.8561190140080356,
+      "tn": 18556354,
+      "tp": 4698864
+     },
+     "11N": {
+      "accuracy": 0.9912475723542419,
+      "f1": 0.9081606972765819,
+      "fn": 22796,
+      "fp": 6033,
+      "iou": 0.831771392558704,
+      "n": 3293829,
+      "precision": 0.9593934254099022,
+      "recall": 0.8621223576375238,
+      "tn": 3122461,
+      "tp": 142539
+     }
+    }
+   },
+   "pixels_scored": 27630304,
+   "stop_rule_min_class": 3,
+   "unclassified_pixels_in_classes_1_to_5": 104
+  }
+ }
+}

@@ -1,0 +1,26 @@
+# The hosted demo page (demo/app.py): Streamlit and its map component, pinned to the versions the
+# page was run and checked with, and the package itself.
+#
+# The page needs tessera_apps 0.2.0, which reads the store through geotessera. 0.2.0 is not on PyPI
+# yet: PyPI has only 0.1.0, which cannot run this page. So the last line asks for 0.2.0 and this
+# file assumes it is installed already, from a checkout of the repository, before this file:
+#
+#   pip install -r requirements-lock.txt   # the package's tested dependencies, from the repository root
+#   pip install --no-deps .                # tessera_apps 0.2.0 from the checkout
+#   pip install -r demo/requirements.txt   # finds tessera_apps==0.2.0 satisfied and adds the page's own
+#
+# Until 0.2.0 is published, a host that installs this file alone (Streamlit Community Cloud does)
+# stops at the last line with "No matching distribution found for tessera_apps==0.2.0". There, wait
+# for 0.2.0 on PyPI, or, if the repository is public, replace the line with
+# "tessera_apps @ git+https://github.com/rh281/tessera_apps.git@<the 0.2.0 commit>".
+#
+# The constraint line holds every package the lock pins to the lock's version, so a host that
+# installs this file alone gets the versions the tests and the image ran (without it, pandas,
+# pillow, python-dateutil, numcodecs and others resolve to newer releases that were never run with
+# the page). pip and uv read the path relative to this file, so it needs the repository's
+# requirements-lock.txt beside the demo folder, as in a checkout. Whether Community Cloud's
+# installer honours a constraint line was not checked.
+-c ../requirements-lock.txt
+streamlit==1.66.1
+streamlit-folium==0.27.4
+tessera_apps==0.2.0

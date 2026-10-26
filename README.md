@@ -2,7 +2,7 @@
 
 Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global embeddings published by dClimate: 128-dimension, 10 m, annual (2017 to 2025) embeddings in an anonymous Icechunk store at `s3://tessera-embeddings/v1.1/dclimate.icechunk` (AWS `us-west-2`). No GPU, no model training beyond scikit-learn linear models.
 
-**Status: version 0.2.0.** All four apps are built; 0.1.0, the first release, closed checkpoint 7 of the build brief. 0.2.0 reads every embedding through [`geotessera`](https://github.com/ucam-eo/geotessera) 0.11 with the dClimate v1.1 store, adds the retrieval notebook 00, and in `wildfire`, `deforest` and `wetland` redoes a changed validation without reading the store again. Its validation numbers still use stand-ins for the real references, which could not be reached from the build environment ([CHANGELOG.md](https://github.com/rh281/tessera_apps/blob/main/CHANGELOG.md)). The hosted demo (checkpoint 8) is next. See [docs/checkpoints.md](https://github.com/rh281/tessera_apps/blob/main/docs/checkpoints.md) for the checkpoint reports and numbers.
+**Status: version 0.2.0.** All four apps are built; 0.1.0, the first release, closed checkpoint 7 of the build brief. 0.2.0 reads every embedding through [`geotessera`](https://github.com/ucam-eo/geotessera) 0.11 with the dClimate v1.1 store, adds the retrieval notebook 00, and in `wildfire`, `deforest` and `wetland` redoes a changed validation without reading the store again. Its validation numbers still use stand-ins for the real references, which could not be reached from the build environment ([CHANGELOG.md](https://github.com/rh281/tessera_apps/blob/main/CHANGELOG.md)). The [hosted demo](#hosted-demo) page and its Dockerfile are in `demo/` (checkpoint 8), not shipped in the wheel or the sdist; deploying it is left to the owner. See [docs/checkpoints.md](https://github.com/rh281/tessera_apps/blob/main/docs/checkpoints.md) for the checkpoint reports and numbers.
 
 **New here? Start with [notebook 00](https://github.com/rh281/tessera_apps/blob/main/notebooks/00_retrieval.ipynb)**, which reads embeddings for a point, a box and a list of points, first through `geotessera` and then from the store directly, in about two minutes and at most about 0.7 GB read from S3. Then work through the four app notebooks: [01 wildfire](https://github.com/rh281/tessera_apps/blob/main/notebooks/01_wildfire.ipynb), [02 deforest](https://github.com/rh281/tessera_apps/blob/main/notebooks/02_deforest.ipynb), [03 wetland](https://github.com/rh281/tessera_apps/blob/main/notebooks/03_wetland.ipynb) and [04 restore](https://github.com/rh281/tessera_apps/blob/main/notebooks/04_restore.ipynb) (run with 0.1.0; their results are the same under 0.2.0).
 
@@ -19,7 +19,7 @@ Climate applications built on the [TESSERA](https://geotessera.org) v1.1 global 
 pip install tessera_apps
 ```
 
-Python 3.12 or 3.13. No AWS credentials and no AWS account are needed: the store allows anonymous reads. GDAL comes inside the rasterio wheel, so there is nothing else to install. `tessera-apps info` opens the store and prints its snapshot and a zone's published years, which is a quick check that it can be reached.
+Python 3.12 or 3.13. No AWS credentials and no AWS account are needed: the store allows anonymous reads. GDAL comes inside the rasterio wheel. That GDAL links against the system's libexpat (`libexpat.so.1`), which most Linux installs have; on a minimal Debian or Ubuntu system (the `python:3.12-slim` image, for example) also run `apt-get install libexpat1`, or importing rasterio fails with "libexpat.so.1: cannot open shared object file". `tessera-apps info` opens the store and prints its snapshot and a zone's published years, which is a quick check that it can be reached.
 
 From source, the latest `main`:
 
@@ -86,12 +86,12 @@ Maps where it burned between two years and how far each burned pixel has recover
 tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --fire-name Caldor
 ```
 
-To score against the Hansen 2021 loss outline bundled with the demo and a Sentinel-2 dNBR severity map, as notebook 01 does, write the outline out, build the map (from a checkout of this repository: the script reads about 600 MB of Sentinel-2 imagery anonymously, in about 2 minutes) and pass both. The validation inputs are not part of the run's arguments, so after the first command this one reads no chunk: it redoes the validation from the outputs in `out` and redraws the preview with the outline:
+To score against the Hansen 2021 loss outline bundled with the demo and a Sentinel-2 dNBR severity map, as notebook 01 does, write the outline out (the first line writes it as notebook 01 and the [hosted demo](#hosted-demo)'s precomputed run do, byte for byte), build the map (from a checkout of this repository: the script reads about 600 MB of Sentinel-2 imagery anonymously, in about 2 minutes) and pass both. The validation inputs are not part of the run's arguments, so after the first command this one reads no chunk: it redoes the validation from the outputs in `out` and redraws the preview with the outline:
 
 ```bash
-python -c 'import geopandas as gpd; from tessera_apps.demo import demo_feature; gpd.GeoSeries([demo_feature("caldor", "hansen_2021_loss_outline")], crs=4326).to_file("outline.geojson")'
+python -c 'import json; from tessera_apps.demo import demo_geojson; c = demo_geojson("caldor"); json.dump({"type": "FeatureCollection", "features": [f for f in c["features"] if (f.get("properties") or {}).get("role") == "hansen_2021_loss_outline"]}, open("hansen2021_outline.geojson", "w"))'
 python scripts/make_caldor_dnbr.py --out caldor_s2_dnbr6.tif
-tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --reference outline.geojson --severity caldor_s2_dnbr6.tif
+tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --reference hansen2021_outline.geojson --severity caldor_s2_dnbr6.tif
 ```
 
 This writes `out/wildfire_2020_2022.tif` (distance, burned and per-year recovery bands), two PCA false colour COGs, `wildfire_summary.parquet` and `.csv` (one row per year), `wildfire_preview.png`, `wildfire_report.json` and `wildfire_validation.json`. The Caldor demo reads about 23 GB and takes about 12 minutes outside us-west-2. On Caldor the burned mask scores IoU 0.813 against moderate or worse burn in the Sentinel-2 dNBR severity map made by [scripts/make_caldor_dnbr.py](https://github.com/rh281/tessera_apps/blob/main/scripts/make_caldor_dnbr.py) (MTBS itself could not be reached from the build environment). NIFC could not be reached either, so the first command's validation could not be checked there. See [notebook 01](https://github.com/rh281/tessera_apps/blob/main/notebooks/01_wildfire.ipynb) and [docs/checkpoints.md](https://github.com/rh281/tessera_apps/blob/main/docs/checkpoints.md) for the results.
@@ -136,6 +136,23 @@ Each file also holds a mature target stand and a stand that stayed pasture (`<de
 
 There is no global reference layer for restoration outcomes. The null test checks that the method reports nothing where nothing happened; it is not an accuracy.
 
+## Hosted demo
+
+[demo/app.py](https://github.com/rh281/tessera_apps/blob/main/demo/app.py) is a single Streamlit page with two parts. A dropdown shows each of the five bundled demos as run at snapshot `RC6FS07ZB0T76EXT8XRG`: its preview, summary table, headline numbers with what each is scored against, the run's warnings and the command that reproduces it. The references are stand-ins: a Hansen 2021 loss outline for the NIFC Caldor perimeter, a Sentinel-2 dNBR proxy for MTBS, and the ESA WorldCover mangrove class for Global Mangrove Watch, none of which could be reached from the build environment; the two restore sites are synthetic. These come from [demo/precomputed](https://github.com/rh281/tessera_apps/tree/main/demo/precomputed), written by [demo/precompute.py](https://github.com/rh281/tessera_apps/blob/main/demo/precompute.py), so choosing a demo reads nothing from the store.
+
+A map opens on the Caldor AOI, and a click runs the wildfire recovery trajectory of the clicked pixel ([demo/trajectory.py](https://github.com/rh281/tessera_apps/blob/main/demo/trajectory.py)). The click reads only the 256 x 256 chunk (2.56 km) that holds the pixel, for the pre-fire year and every year after it. Inside the Caldor AOI at the demo's years (2020 and 2022), it takes the threshold and unburned reference of the precomputed Caldor run, so the pixel's burned verdict and recovery index are that run's: in a live check at three burned pixels, the click's recovery index in every year equalled the run's output exactly. Anywhere else, or at other years, it applies the app's threshold rule and unburned reference to the window alone, with the app's warnings about them, so its verdict can differ from a run over a whole fire. Then it also reads the year before the pre-fire year when the window's threshold falls back to the stable pair or the window has a burned and unburned split: about 8 MB more (56,031,773 bytes for a click west of the AOI, against 48,444,831 for the burned Caldor pixel below). The page shows the chunk payload bytes read and the wall time of every click. Live in the container on 2026-10-26, a first click on a burned Caldor pixel read 48,444,831 bytes in 3.57 s (3.92 s in all, after 2.70 s to open the store), and a second click in the same chunk read nothing, from the cache, in 0.23 s. The pixel's similarities to its pre-fire year never depend on the window. The click reads snapshot `RC6FS07ZB0T76EXT8XRG` unless `TESSERA_APPS_DEMO_SNAPSHOT` names another. No AWS credentials are needed.
+
+From a checkout installed by the reproducible route above:
+
+```bash
+uv pip install -p .venv -r demo/requirements.txt   # Streamlit and streamlit-folium, pinned; the rest held to the lock
+.venv/bin/streamlit run demo/app.py
+```
+
+With plain pip, the first line is `.venv/bin/pip install -r demo/requirements.txt`. If the checkout was installed before 0.2.0, run `uv pip install -p .venv --no-deps -e .` again first: an editable install keeps the version it was installed at, and `demo/requirements.txt` asks for `tessera_apps==0.2.0`.
+
+The demo is not part of the wheel or the sdist. Until 0.2.0 is on PyPI, [demo/requirements.txt](https://github.com/rh281/tessera_apps/blob/main/demo/requirements.txt) expects the package installed from the checkout first, as above, and says what a host that installs that file alone needs. [demo/README.md](https://github.com/rh281/tessera_apps/blob/main/demo/README.md) covers deploying the page.
+
 ## Reading the store
 
 ```python
@@ -175,9 +192,9 @@ What `io.py` takes care of:
 From a checkout installed by the reproducible route above:
 
 ```bash
-.venv/bin/python -m pytest -q          # 1,218 offline tests, in-memory stores and a real 64 x 64 fixture
+.venv/bin/python -m pytest -q          # 1,276 offline tests, in-memory stores and a real 64 x 64 fixture
 .venv/bin/python -m pytest -m network  # live store and reference datasets (NIFC, EFFIS, Zenodo, USFS must be reachable), and the Itapebi restore demo
-.venv/bin/ruff check src tests scripts && .venv/bin/ruff format --check src tests scripts && .venv/bin/mypy src tests scripts
+.venv/bin/ruff check src tests scripts demo && .venv/bin/ruff format --check src tests scripts demo && .venv/bin/mypy src tests scripts demo
 ```
 
 To regenerate the lock after changing dependencies, run `uv pip compile pyproject.toml --all-extras --python-version 3.12 --no-header -o requirements-lock.txt`. CI checks that the committed lock still matches `pyproject.toml`.

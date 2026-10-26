@@ -2,9 +2,13 @@
 
 All notable changes to `tessera_apps`. Versions follow [semantic versioning](https://semver.org); a version number is never reused on PyPI.
 
-## 0.2.0 (2026-10-24)
+## 0.2.0 (2026-10-26)
 
 Every embedding is now read through [geotessera](https://github.com/ucam-eo/geotessera) 0.11, the University of Cambridge client, pointed at the dClimate v1.1 store. At the same snapshot every app writes the same output files as 0.1.0, byte for byte, all but the report, and takes longer to do it. In three of the four apps, changing a run's reference or other validation inputs no longer reads the store again. The real validation references and a real restoration site planned for this release could not be reached from the build environment, so the validation numbers and the restore demos are as in 0.1.0.
+
+### Added
+
+- **A hosted demo page** in [demo/](https://github.com/rh281/tessera_apps/tree/main/demo), with a Dockerfile, neither of which is part of the wheel or the sdist: a Streamlit page that shows the five bundled demos' precomputed outputs and runs the wildfire recovery trajectory of a clicked pixel from the one 2.56 km chunk that holds it (live, 48,444,831 bytes in 3.57 s for the default years, nothing when the chunk is cached). Inside the Caldor AOI at the demo's years the click takes the precomputed Caldor run's threshold and unburned reference, so its burned verdict and recovery index are that run's; elsewhere it applies the app's rules, and the app's warnings, to the chunk alone. See the [README](https://github.com/rh281/tessera_apps/blob/main/README.md#hosted-demo).
 
 ### Changed
 

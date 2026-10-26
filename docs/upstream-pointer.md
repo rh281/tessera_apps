@@ -41,7 +41,7 @@ tessera-apps deforest --aoi rondonia --year-a 2019 --year-b 2022 --validate
 
 - **What it is**, in one sentence, with the link: the four apps and what each answers.
 - **geotessera with the v1.1 dClimate store:** since 0.2.0 every embedding read goes through `geotessera` 0.11, opened with `store_url="s3://tessera-embeddings/v1.1/dclimate.icechunk"`, and a run refuses to read unless geotessera names the dataset `1.1-dclimate`.
-- **How to get it:** `pip install tessera_apps`, from PyPI. It needs Python 3.12 or 3.13 and nothing else, since GDAL comes inside the rasterio wheel.
+- **How to get it:** `pip install tessera_apps`, from PyPI. It needs Python 3.12 or 3.13 and, on minimal Linux systems, the system libexpat (`libexpat1`), which the GDAL bundled in the rasterio wheel links against.
 - **One demo command** that works straight after the install: the Rondonia AOI ships inside the package. It is the cheapest demo with a validation against an independent layer (Hansen loss). Under 0.2.0 it read 1,550,387,529 bytes in 85 s outside us-west-2 (0.2.0 checkpoint A in [docs/checkpoints.md](https://github.com/rh281/tessera_apps/blob/main/docs/checkpoints.md); 0.1.0 took 81 s in the same session). The Caldor wildfire demo reads 23 GB.
 - **No AWS account**, which matches the "No AWS account is needed" line earlier in the same section.
 

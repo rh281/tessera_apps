@@ -1,0 +1,781 @@
+{
+  "schema_version": 1,
+  "about": "Precomputed outputs of the five bundled demos, made by demo/precompute.py. Every number comes from the run's report or validation file, named in its source field; bytes_read and wall_s are those of the run that wrote the outputs.",
+  "snapshot": "RC6FS07ZB0T76EXT8XRG",
+  "store": {
+    "url": "s3://tessera-embeddings/v1.1/dclimate.icechunk",
+    "dataset": "1.1-dclimate",
+    "model_version": "https://geotessera.org/model/1.1",
+    "build_version": "0.1.0"
+  },
+  "demos": [
+    {
+      "name": "caldor",
+      "app": "wildfire",
+      "aoi": {
+        "demo": "caldor",
+        "title": "Caldor Fire 2021 demo AOI",
+        "source": "demo:caldor",
+        "area_ha": 279848.75,
+        "pixels": 27984875,
+        "zones": [
+          "10N",
+          "11N"
+        ],
+        "sha256": "c58689e50d36b86afe16bf34030a17e5cbc3b43dc8764e7ac2c67e19cab37640",
+        "bounds_lonlat": [
+          -120.678525,
+          38.524034,
+          -119.908475,
+          38.900216
+        ],
+        "status": "provisional: replace with the NIFC perimeter bbox plus 2 km when NIFC is reachable"
+      },
+      "years": {
+        "year_a": 2020,
+        "year_b": 2022,
+        "read": [
+          2019,
+          2020,
+          2022,
+          2023,
+          2024,
+          2025
+        ],
+        "fire_year": 2021,
+        "recovery": [
+          2022,
+          2023,
+          2024,
+          2025
+        ]
+      },
+      "command": "tessera-apps wildfire --aoi caldor --year-a 2020 --year-b 2022 --validate --reference hansen2021_outline.geojson --severity caldor_s2_dnbr6.tif --snapshot RC6FS07ZB0T76EXT8XRG --out out/caldor",
+      "command_cwd": "the work directory, holding hansen2021_outline.geojson and caldor_s2_dnbr6.tif",
+      "snapshot": "RC6FS07ZB0T76EXT8XRG",
+      "versions": {
+        "tessera_apps": "0.2.0",
+        "geotessera": "0.11.0"
+      },
+      "bytes_read": 23025809926,
+      "wall_s": 913.494,
+      "run_created_utc": "2026-10-26T18:14:55+00:00",
+      "files": {
+        "preview": {
+          "path": "caldor/wildfire_preview.png",
+          "bytes": 1594236,
+          "sha256": "bdbdae27d264f5ba9a617d3e3ef35e524791fa60c81f81ff86b09fd4025575c4"
+        },
+        "summary_csv": {
+          "path": "caldor/wildfire_summary.csv",
+          "bytes": 995,
+          "sha256": "252a84266dc7c9818974ddcc2b7d9226aacffdcfdfa744e55fdee17a2a2c4d34"
+        },
+        "validation": {
+          "path": "caldor/wildfire_validation.json",
+          "bytes": 13018,
+          "sha256": "2ff5dd558ce12d1d0d2d36bd513915f543d4f73f1aff8bdb23777119fff263d5"
+        }
+      },
+      "headline": [
+        {
+          "key": "burned_area_ha",
+          "label": "Burned area",
+          "value": 51442.64,
+          "display": "51,442.6 ha",
+          "unit": "ha",
+          "source": "wildfire_report.json summary.burned_area_ha"
+        },
+        {
+          "key": "burned_fraction",
+          "label": "Share of classified pixels burned",
+          "value": 0.1838248573482967,
+          "display": "18.4%",
+          "unit": "fraction",
+          "source": "wildfire_report.json summary.burned_fraction"
+        },
+        {
+          "key": "threshold",
+          "label": "Cosine distance threshold (method: otsu)",
+          "value": 0.24403303861618042,
+          "display": "0.244",
+          "unit": "cosine distance",
+          "source": "wildfire_report.json summary.threshold.threshold"
+        },
+        {
+          "key": "severity_iou",
+          "label": "IoU against moderate or worse burn",
+          "value": 0.8134776019917033,
+          "display": "0.813",
+          "unit": "IoU",
+          "scored_against": "moderate or worse burn (classes 3 and 4) in caldor_s2_dnbr6.tif, sha256 1ce333dee3236a4c",
+          "reference": "A Sentinel-2 dNBR proxy for MTBS, made by scripts/make_caldor_dnbr.py, since MTBS could not be reached from the build environment. Likely optimistic against real MTBS: the proxy and the embeddings both come from Sentinel-2.",
+          "source": "wildfire_validation.json scores.severity.moderate_or_worse.iou"
+        },
+        {
+          "key": "outline_iou",
+          "label": "IoU against the reference outline",
+          "value": 0.6453089832707419,
+          "display": "0.645",
+          "unit": "IoU",
+          "scored_against": "the Hansen 2021 loss outline bundled with the demo (hansen2021_outline.geojson, sha256 d096b2440cc311d3)",
+          "reference": "A stand-in for the NIFC Caldor perimeter, which could not be reached from the build environment: the outline of Hansen Global Forest Change 2021 forest loss, not a fire perimeter.",
+          "source": "wildfire_validation.json scores.burned.iou"
+        },
+        {
+          "key": "outline_recall_inside",
+          "label": "Share of the outline mapped as burned",
+          "value": 0.6768385626090387,
+          "display": "0.677",
+          "unit": "recall",
+          "scored_against": "the Hansen 2021 loss outline bundled with the demo (hansen2021_outline.geojson, sha256 d096b2440cc311d3)",
+          "reference": "A stand-in for the NIFC Caldor perimeter, which could not be reached from the build environment: the outline of Hansen Global Forest Change 2021 forest loss, not a fire perimeter.",
+          "source": "wildfire_validation.json scores.recall_inside_reference"
+        }
+      ],
+      "labels": [
+        "The reference outline is a Hansen 2021 loss stand-in for the NIFC perimeter, which could not be reached.",
+        "The severity map is a Sentinel-2 dNBR proxy for MTBS, which could not be reached.",
+        "The demo AOI is provisional: demo:caldor is derived from Hansen loss, not the NIFC perimeter."
+      ],
+      "warnings": [],
+      "inputs": [
+        {
+          "file": "hansen2021_outline.geojson",
+          "sha256": "d096b2440cc311d3a3a64b8c12a7db236ef13bac17f3fa46345db5cfb09f2176",
+          "made_by": "the caldor.geojson feature with role hansen_2021_loss_outline, written as notebook 01 does"
+        },
+        {
+          "file": "caldor_s2_dnbr6.tif",
+          "sha256": "1ce333dee3236a4c270ea4693d7e222ed57073c0a915077dfb7dd01d1f9b919f",
+          "made_by": "python scripts/make_caldor_dnbr.py --out caldor_s2_dnbr6.tif"
+        }
+      ],
+      "app_headline": "Severity (Sentinel-2 dNBR proxy): IoU 0.813 against moderate or worse; detected high 99.6%, moderate 77.5%, low 9.7%, unburned to low 0.3%, increased greenness 1.2%. Reference outline: recall inside it 0.677, IoU 0.645."
+    },
+    {
+      "name": "rondonia",
+      "app": "deforest",
+      "aoi": {
+        "demo": "rondonia",
+        "title": "Rondonia deforestation front demo AOI",
+        "source": "demo:rondonia",
+        "area_ha": 39716.88,
+        "pixels": 3971688,
+        "zones": [
+          "20S"
+        ],
+        "sha256": "6c42c5b3c0f67c3dbbc1220344598802ece82e7ce2a1a350fccb1c747bfbacda",
+        "bounds_lonlat": [
+          -63.20087,
+          -8.75983,
+          -63.01913,
+          -8.58017
+        ]
+      },
+      "years": {
+        "year_a": 2019,
+        "year_b": 2022,
+        "read": [
+          2019,
+          2022
+        ]
+      },
+      "command": "tessera-apps deforest --aoi rondonia --year-a 2019 --year-b 2022 --validate --snapshot RC6FS07ZB0T76EXT8XRG --out out/rondonia",
+      "command_cwd": "the work directory",
+      "snapshot": "RC6FS07ZB0T76EXT8XRG",
+      "versions": {
+        "tessera_apps": "0.2.0",
+        "geotessera": "0.11.0"
+      },
+      "bytes_read": 1550387529,
+      "wall_s": 105.999,
+      "run_created_utc": "2026-10-26T18:16:43+00:00",
+      "files": {
+        "preview": {
+          "path": "rondonia/deforest_preview.png",
+          "bytes": 1569715,
+          "sha256": "c40ec3edf563369f0ad018d78014ee6360f968cc704768f231b654205420ba7f"
+        },
+        "summary_csv": {
+          "path": "rondonia/deforest_summary.csv",
+          "bytes": 363,
+          "sha256": "2e8ce92a664caf5ea8fb304cf0ea25e40f5d2fc9f2f3da6be5b0ba40d0a60480"
+        },
+        "validation": {
+          "path": "rondonia/deforest_validation.json",
+          "bytes": 11605,
+          "sha256": "d093aadc9d4b8656385f63302eceeb5a73637320a92c8f30878d49718a5f474c"
+        }
+      },
+      "headline": [
+        {
+          "key": "forest_loss_ha",
+          "label": "Forest converted to non-forest, 2019 to 2022",
+          "value": 6018.25,
+          "display": "6,018.2 ha",
+          "unit": "ha",
+          "source": "deforest_report.json summary.converted_ha"
+        },
+        {
+          "key": "loss_share_of_forest",
+          "label": "Share of the 2019 forest converted",
+          "value": 0.2500396772968585,
+          "display": "25.0%",
+          "unit": "fraction",
+          "source": "deforest_report.json summary.conversion_fraction_of_forest"
+        },
+        {
+          "key": "forest_ha_year_a",
+          "label": "Forest in 2019",
+          "value": 24069.18,
+          "display": "24,069.2 ha",
+          "unit": "ha",
+          "source": "deforest_report.json summary.forest_ha_year_a"
+        },
+        {
+          "key": "forest_ha_year_b",
+          "label": "Forest in 2022",
+          "value": 17497.27,
+          "display": "17,497.3 ha",
+          "unit": "ha",
+          "source": "deforest_report.json summary.forest_ha_year_b"
+        },
+        {
+          "key": "hansen_precision",
+          "label": "Precision against Hansen loss",
+          "value": 0.9756872845096166,
+          "display": "0.976",
+          "unit": "precision",
+          "scored_against": "Hansen Global Forest Change GFC-2025-v1.13 loss after 2019 through 2022 (lossyear codes 20, 21, 22), on land (datamask 1)",
+          "reference": "Hansen Global Forest Change, the brief's reference for this app. The classifier's training labels also come from Hansen, sampled only in a ring 0 to 5 km outside the AOI, so the score inside the AOI is spatially held out but not independent of Hansen.",
+          "source": "deforest_validation.json scores.conversion.precision"
+        },
+        {
+          "key": "hansen_recall",
+          "label": "Recall against Hansen loss",
+          "value": 0.6678392662779231,
+          "display": "0.668",
+          "unit": "recall",
+          "scored_against": "Hansen Global Forest Change GFC-2025-v1.13 loss after 2019 through 2022 (lossyear codes 20, 21, 22), on land (datamask 1)",
+          "reference": "Hansen Global Forest Change, the brief's reference for this app. The classifier's training labels also come from Hansen, sampled only in a ring 0 to 5 km outside the AOI, so the score inside the AOI is spatially held out but not independent of Hansen.",
+          "source": "deforest_validation.json scores.conversion.recall"
+        },
+        {
+          "key": "hansen_iou",
+          "label": "IoU against Hansen loss",
+          "value": 0.6569072856943085,
+          "display": "0.657",
+          "unit": "iou",
+          "scored_against": "Hansen Global Forest Change GFC-2025-v1.13 loss after 2019 through 2022 (lossyear codes 20, 21, 22), on land (datamask 1)",
+          "reference": "Hansen Global Forest Change, the brief's reference for this app. The classifier's training labels also come from Hansen, sampled only in a ring 0 to 5 km outside the AOI, so the score inside the AOI is spatially held out but not independent of Hansen.",
+          "source": "deforest_validation.json scores.conversion.iou"
+        },
+        {
+          "key": "hansen_f1",
+          "label": "F1 against Hansen loss",
+          "value": 0.7929318572813673,
+          "display": "0.793",
+          "unit": "f1",
+          "scored_against": "Hansen Global Forest Change GFC-2025-v1.13 loss after 2019 through 2022 (lossyear codes 20, 21, 22), on land (datamask 1)",
+          "reference": "Hansen Global Forest Change, the brief's reference for this app. The classifier's training labels also come from Hansen, sampled only in a ring 0 to 5 km outside the AOI, so the score inside the AOI is spatially held out but not independent of Hansen.",
+          "source": "deforest_validation.json scores.conversion.f1"
+        }
+      ],
+      "labels": [],
+      "warnings": [
+        "The cross-check cut 0.244 is 1.60 times the 95th percentile of the 2019 to 2022 distance among 348 forest labels in the ring that Hansen keeps unchanged (0.153): the AOI pixels classed forest in both years likely include conversions the classifier missed, so the cut may remove real conversions. The cut keeps the survey N13 rule; see summary.cross_check (and cross_check_removed when validating against Hansen), or lower --stable-percentile to keep more."
+      ]
+    },
+    {
+      "name": "everglades",
+      "app": "wetland",
+      "aoi": {
+        "demo": "everglades",
+        "title": "Ten Thousand Islands and Everglades mangrove coast demo AOI",
+        "source": "demo:everglades",
+        "area_ha": 73236.96,
+        "pixels": 7323696,
+        "zones": [
+          "17N"
+        ],
+        "sha256": "89308f99e46f7a50a637aae3512ffc7be39cac07995a354fed1854e1af42e001",
+        "bounds_lonlat": [
+          -81.62,
+          25.75,
+          -81.32,
+          25.97
+        ]
+      },
+      "years": {
+        "year_a": 2020,
+        "year_b": 2024,
+        "read": [
+          2020,
+          2024
+        ],
+        "note": "year_a is 2020, not the brief's 2018: ESA WorldCover, the mangrove reference this build can reach, exists for 2020 and 2021 only, and the brief's 2018 needs Global Mangrove Watch v3, whose host (zenodo.org) is blocked here."
+      },
+      "command": "tessera-apps wetland --aoi everglades --year-a 2020 --year-b 2024 --validate --snapshot RC6FS07ZB0T76EXT8XRG --out out/everglades",
+      "command_cwd": "the work directory",
+      "snapshot": "RC6FS07ZB0T76EXT8XRG",
+      "versions": {
+        "tessera_apps": "0.2.0",
+        "geotessera": "0.11.0"
+      },
+      "bytes_read": 2368295436,
+      "wall_s": 115.307,
+      "run_created_utc": "2026-10-26T18:18:40+00:00",
+      "files": {
+        "preview": {
+          "path": "everglades/wetland_preview.png",
+          "bytes": 1294711,
+          "sha256": "ab503704438aaa5a8075f99d13e9c66afec44d1756690ea0ca0faa3d2095d9e5"
+        },
+        "summary_csv": {
+          "path": "everglades/wetland_summary.csv",
+          "bytes": 384,
+          "sha256": "54b96df55b1e2af175c3b612e20e96705ede13c5b2bcae74d7f74a5aa89cd6bb"
+        },
+        "validation": {
+          "path": "everglades/wetland_validation.json",
+          "bytes": 3670,
+          "sha256": "6e58ed8621178a555639ae688eec2e4ddfd4b359be3e02e87a433134e836084f"
+        }
+      },
+      "headline": [
+        {
+          "key": "extent_ha_year_a",
+          "label": "Extent in 2020",
+          "value": 22813.31,
+          "display": "22,813.3 ha",
+          "unit": "ha",
+          "source": "wetland_report.json summary.extent_ha_year_a"
+        },
+        {
+          "key": "extent_ha_year_b",
+          "label": "Extent in 2024",
+          "value": 24979.12,
+          "display": "24,979.1 ha",
+          "unit": "ha",
+          "source": "wetland_report.json summary.extent_ha_year_b"
+        },
+        {
+          "key": "net_change_ha",
+          "label": "Net change, 2020 to 2024",
+          "value": 2165.81,
+          "display": "+2,165.8 ha",
+          "unit": "ha",
+          "source": "wetland_report.json summary.net_change_ha"
+        },
+        {
+          "key": "gain_ha",
+          "label": "Gain",
+          "value": 2525.82,
+          "display": "2,525.8 ha",
+          "unit": "ha",
+          "source": "wetland_report.json summary.gain_ha"
+        },
+        {
+          "key": "loss_ha",
+          "label": "Loss",
+          "value": 360.01,
+          "display": "360.0 ha",
+          "unit": "ha",
+          "source": "wetland_report.json summary.loss_ha"
+        },
+        {
+          "key": "reference_iou",
+          "label": "IoU against WorldCover 2020 mangroves",
+          "value": 0.8459814640561587,
+          "display": "0.846",
+          "unit": "iou",
+          "scored_against": "ESA WorldCover 2020 (v100), class 95 mangroves, leaving out the seed pixels and 200 m around them",
+          "reference": "The reference this run used: the ESA WorldCover mangrove class, a stand-in for Global Mangrove Watch, which could not be reached from the build environment. The bundled seeds were drawn from WorldCover too, so the score is not independent of the seeds. WorldCover has no map for 2024, so that year is not scored.",
+          "source": "wetland_validation.json scores.extent_2020.iou"
+        },
+        {
+          "key": "reference_precision",
+          "label": "Precision against WorldCover 2020 mangroves",
+          "value": 0.9397679327693044,
+          "display": "0.940",
+          "unit": "precision",
+          "scored_against": "ESA WorldCover 2020 (v100), class 95 mangroves, leaving out the seed pixels and 200 m around them",
+          "reference": "The reference this run used: the ESA WorldCover mangrove class, a stand-in for Global Mangrove Watch, which could not be reached from the build environment. The bundled seeds were drawn from WorldCover too, so the score is not independent of the seeds. WorldCover has no map for 2024, so that year is not scored.",
+          "source": "wetland_validation.json scores.extent_2020.precision"
+        },
+        {
+          "key": "reference_recall",
+          "label": "Recall against WorldCover 2020 mangroves",
+          "value": 0.8944811808316864,
+          "display": "0.894",
+          "unit": "recall",
+          "scored_against": "ESA WorldCover 2020 (v100), class 95 mangroves, leaving out the seed pixels and 200 m around them",
+          "reference": "The reference this run used: the ESA WorldCover mangrove class, a stand-in for Global Mangrove Watch, which could not be reached from the build environment. The bundled seeds were drawn from WorldCover too, so the score is not independent of the seeds. WorldCover has no map for 2024, so that year is not scored.",
+          "source": "wetland_validation.json scores.extent_2020.recall"
+        },
+        {
+          "key": "reference_f1",
+          "label": "F1 against WorldCover 2020 mangroves",
+          "value": 0.9165655024479944,
+          "display": "0.917",
+          "unit": "f1",
+          "scored_against": "ESA WorldCover 2020 (v100), class 95 mangroves, leaving out the seed pixels and 200 m around them",
+          "reference": "The reference this run used: the ESA WorldCover mangrove class, a stand-in for Global Mangrove Watch, which could not be reached from the build environment. The bundled seeds were drawn from WorldCover too, so the score is not independent of the seeds. WorldCover has no map for 2024, so that year is not scored.",
+          "source": "wetland_validation.json scores.extent_2020.f1"
+        }
+      ],
+      "labels": [
+        "The wetland reference is the ESA WorldCover mangrove class, a stand-in for Global Mangrove Watch."
+      ],
+      "warnings": []
+    },
+    {
+      "name": "itapebi",
+      "app": "restore",
+      "aoi": {
+        "demo": "itapebi",
+        "title": "Itapebi, Bahia: eucalyptus planting on pasture (synthetic restore demo site)",
+        "source": "demo:itapebi",
+        "area_ha": 62.0903319861453,
+        "pixels": 6200,
+        "zones": [
+          "24S"
+        ],
+        "sha256": "3eeb24c909d720544c157ad7bc7ef9d767b5c6320cb8dda3b339827fda7bb7c0",
+        "bounds_lonlat": [
+          -39.537459,
+          -15.998507,
+          -39.526449,
+          -15.988775
+        ],
+        "extent_area_ha": 3239.81,
+        "land_use": "plantation (likely eucalyptus) on former pasture",
+        "synthetic": true
+      },
+      "years": {
+        "year_a": 2018,
+        "year_b": 2025,
+        "read": [
+          2017,
+          2018,
+          2019,
+          2020,
+          2021,
+          2022,
+          2023,
+          2024,
+          2025
+        ],
+        "planted": 2019,
+        "trajectory": [
+          2018,
+          2019,
+          2020,
+          2021,
+          2022,
+          2023,
+          2024,
+          2025
+        ]
+      },
+      "command": "tessera-apps restore --aoi itapebi --target demo --validate --snapshot RC6FS07ZB0T76EXT8XRG --out out/itapebi",
+      "command_cwd": "the work directory",
+      "snapshot": "RC6FS07ZB0T76EXT8XRG",
+      "versions": {
+        "tessera_apps": "0.2.0",
+        "geotessera": "0.11.0"
+      },
+      "bytes_read": 766084085,
+      "wall_s": 26.391,
+      "run_created_utc": "2026-10-26T18:19:08+00:00",
+      "files": {
+        "preview": {
+          "path": "itapebi/restore_preview.png",
+          "bytes": 262839,
+          "sha256": "927d7dde5397c916d541fbfae2fb4994fa15bf49e1a05862eff0889bef1487e8"
+        },
+        "summary_csv": {
+          "path": "itapebi/restore_summary.csv",
+          "bytes": 3741,
+          "sha256": "0d67a56d09723b42b02535802559894cb967e76f9f7ebf689162883b493e49e4"
+        },
+        "validation": {
+          "path": "itapebi/restore_validation.json",
+          "bytes": 11206,
+          "sha256": "347aceae752b6e4206f683aeb7ad3c5e3c90ca504553ed96717e39904ac11a81"
+        }
+      },
+      "headline": [
+        {
+          "key": "verdict",
+          "label": "Verdict",
+          "value": "diverging from control since 2019",
+          "display": "diverging from control since 2019",
+          "unit": null,
+          "source": "restore_report.json summary.verdict"
+        },
+        {
+          "key": "verdict_detail",
+          "label": "Why",
+          "value": "The divergence change exceeds the placebo band's 95th percentile in every year from 2019 to 2025 (7 years).",
+          "display": "The divergence change exceeds the placebo band's 95th percentile in every year from 2019 to 2025 (7 years).",
+          "unit": null,
+          "source": "restore_report.json summary.verdict_detail"
+        },
+        {
+          "key": "null_verdict",
+          "label": "Null test verdict",
+          "value": "no divergence detected",
+          "display": "no divergence detected",
+          "unit": null,
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_verdict"
+        },
+        {
+          "key": "null_max_abs_change",
+          "label": "Null test: largest divergence change",
+          "value": 0.010387878460556221,
+          "display": "0.0104",
+          "unit": "cosine distance",
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_max_abs_change"
+        },
+        {
+          "key": "null_to_site_ratio",
+          "label": "Null test against the site's change",
+          "value": 0.02206847182653072,
+          "display": "0.022",
+          "unit": "ratio",
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_to_site_ratio"
+        },
+        {
+          "key": "placebo_false_positive_rate",
+          "label": "Placebos called diverging",
+          "value": 0.025,
+          "display": "2.5%",
+          "unit": "fraction",
+          "scored_against": "site-sized pieces of the control through the same verdict rule",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.site_sized_null.placebo_false_positive_rate"
+        },
+        {
+          "key": "canopy_onset_year",
+          "label": "Canopy onset year",
+          "value": 2021,
+          "display": "2021",
+          "unit": "year",
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.canopy_onset_year"
+        },
+        {
+          "key": "canopy_correlation_sign",
+          "label": "Divergence against canopy gap",
+          "value": "positive",
+          "display": "positive",
+          "unit": null,
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.correlation_sign"
+        },
+        {
+          "key": "canopy_spearman_tall",
+          "label": "Spearman rho, divergence against the gap in canopy of 5 m or more",
+          "value": 0.6306562238868914,
+          "display": "0.631",
+          "unit": "rho",
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.spearman_divergence_vs_tall_gap_change"
+        }
+      ],
+      "labels": [
+        "Synthetic site: located from GLAD canopy height, Hansen, WorldCover and Sentinel-2 imagery because no public planting polygon could be reached. It is not a documented project."
+      ],
+      "warnings": [
+        "The control is matched on 2017, the store's first year (the year before the baseline 2018): it has few Sentinel-2 observations and sparse valid pixels in places (survey S16), so the control match rests on a weak year.",
+        "Only 43% of the ring's candidate pixels (137,101 of 317,171) have 2017 data, the year the control is matched on: a ring pixel without it cannot be filtered, so the control is drawn from that 43% alone and may gather where 2017 had clear views. Pass --match-year with a year of fuller data (2017 to 2018; the default is 2017).",
+        "105 of 6,200 site pixels were dropped: 105 lack data in some year from 2018 to 2025 (the panel rule) and 0 have another radar pattern than the site's majority (survey B5).",
+        "32 of 9,331 control pixels were dropped: 32 lack data in some year from 2018 to 2025 (the panel rule) and 0 have another radar pattern than the site's majority (survey B5).",
+        "Placebos hold a median of 924 pixels (at most 3099, a third of the control pool), fewer than the site's 6095. A smaller placebo has a larger sampling term in 1 - cos, so a change in per-pixel spread between years moves the band rather than only widening it; a year counts only when the site's change is above both the band and zero, so a falling divergence is never called diverging. Widen the ring or pass a larger control for placebos of the site's size."
+      ]
+    },
+    {
+      "name": "jaru",
+      "app": "restore",
+      "aoi": {
+        "demo": "jaru",
+        "title": "Jaru, Rondonia: natural regrowth on abandoned pasture (synthetic restore demo site)",
+        "source": "demo:jaru",
+        "area_ha": 32.05301476461999,
+        "pixels": 3185,
+        "zones": [
+          "20S"
+        ],
+        "sha256": "6dbaec5d4cfe30cfc2a2ffb8df821af3a4081ae9355366d4e7c6fe3c88c43e3b",
+        "bounds_lonlat": [
+          -62.427484,
+          -10.48145,
+          -62.420624,
+          -10.473083
+        ],
+        "extent_area_ha": 3032.6,
+        "land_use": "natural regrowth on abandoned pasture",
+        "synthetic": true
+      },
+      "years": {
+        "year_a": 2018,
+        "year_b": 2025,
+        "read": [
+          2017,
+          2018,
+          2019,
+          2020,
+          2021,
+          2022,
+          2023,
+          2024,
+          2025
+        ],
+        "planted": 2019,
+        "trajectory": [
+          2018,
+          2019,
+          2020,
+          2021,
+          2022,
+          2023,
+          2024,
+          2025
+        ]
+      },
+      "command": "tessera-apps restore --aoi jaru --target demo --validate --snapshot RC6FS07ZB0T76EXT8XRG --out out/jaru",
+      "command_cwd": "the work directory",
+      "snapshot": "RC6FS07ZB0T76EXT8XRG",
+      "versions": {
+        "tessera_apps": "0.2.0",
+        "geotessera": "0.11.0"
+      },
+      "bytes_read": 1025187202,
+      "wall_s": 44.415,
+      "run_created_utc": "2026-10-26T18:19:55+00:00",
+      "files": {
+        "preview": {
+          "path": "jaru/restore_preview.png",
+          "bytes": 267636,
+          "sha256": "9a180b4efda89107b65d096d1661e8172b5dbba3870b316d9778d8a2fafa0a96"
+        },
+        "summary_csv": {
+          "path": "jaru/restore_summary.csv",
+          "bytes": 3912,
+          "sha256": "5080ba717e459658f958b46d9ec2b2c6638a287f4668ee07dc6ee5a5a52906e1"
+        },
+        "validation": {
+          "path": "jaru/restore_validation.json",
+          "bytes": 11238,
+          "sha256": "531d3e5c9ae91e388462d5170f62beef1da53f1883daa2972acff2fab688a264"
+        }
+      },
+      "headline": [
+        {
+          "key": "verdict",
+          "label": "Verdict",
+          "value": "diverging from control since 2020",
+          "display": "diverging from control since 2020",
+          "unit": null,
+          "source": "restore_report.json summary.verdict"
+        },
+        {
+          "key": "verdict_detail",
+          "label": "Why",
+          "value": "The divergence change exceeds the placebo band's 95th percentile in every year from 2020 to 2025 (6 years).",
+          "display": "The divergence change exceeds the placebo band's 95th percentile in every year from 2020 to 2025 (6 years).",
+          "unit": null,
+          "source": "restore_report.json summary.verdict_detail"
+        },
+        {
+          "key": "null_verdict",
+          "label": "Null test verdict",
+          "value": "no divergence detected",
+          "display": "no divergence detected",
+          "unit": null,
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_verdict"
+        },
+        {
+          "key": "null_max_abs_change",
+          "label": "Null test: largest divergence change",
+          "value": 0.0001721571936855737,
+          "display": "0.0002",
+          "unit": "cosine distance",
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_max_abs_change"
+        },
+        {
+          "key": "null_to_site_ratio",
+          "label": "Null test against the site's change",
+          "value": 0.002673649086171763,
+          "display": "0.003",
+          "unit": "ratio",
+          "scored_against": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.null_test.null_to_site_ratio"
+        },
+        {
+          "key": "placebo_false_positive_rate",
+          "label": "Placebos called diverging",
+          "value": 0.01,
+          "display": "1.0%",
+          "unit": "fraction",
+          "scored_against": "site-sized pieces of the control through the same verdict rule",
+          "reference": "A check that the method reports nothing where nothing happened, not an accuracy: there is no global reference layer for restoration outcomes.",
+          "source": "restore_validation.json scores.site_sized_null.placebo_false_positive_rate"
+        },
+        {
+          "key": "canopy_onset_year",
+          "label": "Canopy onset year",
+          "value": 2020,
+          "display": "2020",
+          "unit": "year",
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.canopy_onset_year"
+        },
+        {
+          "key": "canopy_correlation_sign",
+          "label": "Divergence against canopy gap",
+          "value": "positive",
+          "display": "positive",
+          "unit": null,
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.correlation_sign"
+        },
+        {
+          "key": "canopy_spearman_tall",
+          "label": "Spearman rho, divergence against the gap in canopy of 5 m or more",
+          "value": 0.9642857142857145,
+          "display": "0.964",
+          "unit": "rho",
+          "scored_against": "GLAD annual tree canopy height (Potapov et al.), 2018 to 2024",
+          "reference": "GLAD canopy height is a 30 m model that sees only trees of 5 m or more, so a young planting is invisible to it for its first years: an independent check, not ground truth.",
+          "source": "restore_validation.json scores.canopy.spearman_divergence_vs_tall_gap_change"
+        }
+      ],
+      "labels": [
+        "Synthetic site: located from GLAD canopy height, Hansen, WorldCover and Sentinel-2 imagery because no public planting polygon could be reached. It is not a documented project."
+      ],
+      "warnings": [
+        "The control is matched on 2017, the store's first year (the year before the baseline 2018): it has few Sentinel-2 observations and sparse valid pixels in places (survey S16), so the control match rests on a weak year.",
+        "The site already differs from its control at the baseline 2018: its baseline divergence is above 100% of the placebos'; it moved +0.0470 further from the control between 2017 and 2018. Change that began before 2018 is left out of the divergence change, which then understates it; if the site was prepared, planted or began regrowing before 2018, pass an earlier --year-a (and --match-year)."
+      ]
+    }
+  ]
+}

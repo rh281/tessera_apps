@@ -1,0 +1,218 @@
+{
+ "caveats": [
+  "There is no global reference layer for restoration outcomes. The null test (the control pool split into two halves, by alternating angular sectors around the site for the ring or by its median along its long axis for a supplied control, compared exactly as the site is) is a sanity check that the method reports no divergence where none is expected, not an accuracy. Divergence from the control says the site's embeddings moved away from comparable land that started like it; whether that movement is the intended vegetation is for the target trajectory, the canopy check and a site visit to say.",
+  "placebo_false_positive_rate is the share of placebos (site-sized pieces of the control, run through the same verdict rule) that the rule calls diverging. They are judged against a band they are part of, so it cannot exceed about 5 percent by construction: it shows how much the run requirement of the verdict removes, not whether the band is calibrated for this site.",
+  "Each half of the control is far larger than the site (half_to_site_pixels gives the ratio), so its mean varies far less than a site-sized piece of land does and the halves test is easy to pass; null_to_site_ratio compares the largest change of the pair with the site's. The site-sized null is the placebo false positive rate.",
+  "GLAD annual tree canopy height is a Landsat and GEDI model at 30 m that sees only trees of 5 m or more, so a young planting is invisible to it for its first years and the canopy gap lags the embeddings.",
+  "The layer ends in 2024, so 2025 has no canopy value.",
+  "The correlations between the divergence change and the canopy gap change rest on at most 8 years (2017 to 2024), and fewer for a later planting: read their sign and the onset year, not their size.",
+  "A site picked with this layer (the bundled demo) is not independent of it for site choice, although the embeddings are independent of it."
+ ],
+ "reference": {
+  "canopy": {
+   "dataset": "GLAD annual tree canopy height (Potapov et al.)",
+   "error": null,
+   "url_template": "https://storage.googleapis.com/earthenginepartners-hansen/Annual_Layers_2015_2024/TCH/{year}/{tile}.tif",
+   "years": [
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024
+   ]
+  },
+  "global_reference": null,
+  "null_test": "the control pool against itself, split into two halves (alternating angular sectors around the site for the ring, the two sides of its long axis for a supplied control)",
+  "placebo_false_positive_rate": 0.01,
+  "placebo_false_positive_rate_note": "placebo_false_positive_rate is the share of placebos (site-sized pieces of the control, run through the same verdict rule) that the rule calls diverging. They are judged against a band they are part of, so it cannot exceed about 5 percent by construction: it shows how much the run requirement of the verdict removes, not whether the band is calibrated for this site.",
+  "site_sized_null": "site-sized pieces of the control (the placebos) through the same verdict rule"
+ },
+ "scores": {
+  "canopy": {
+   "canopy_onset_year": 2020,
+   "caveats": [
+    "GLAD annual tree canopy height is a Landsat and GEDI model at 30 m that sees only trees of 5 m or more, so a young planting is invisible to it for its first years and the canopy gap lags the embeddings.",
+    "The layer ends in 2024, so 2025 has no canopy value.",
+    "The correlations between the divergence change and the canopy gap change rest on at most 8 years (2017 to 2024), and fewer for a later planting: read their sign and the onset year, not their size.",
+    "A site picked with this layer (the bundled demo) is not independent of it for site choice, although the embeddings are independent of it."
+   ],
+   "correlation_sign": "positive",
+   "correlation_years": 7,
+   "dataset": "GLAD annual tree canopy height (Potapov et al.)",
+   "onset_rule": "first year the site's share of pixels of 5 m or more exceeds the control's by 0.2 or more",
+   "pearson_divergence_vs_mean_gap_change": 0.9691384028275746,
+   "pearson_divergence_vs_tall_gap_change": 0.8601069806250331,
+   "per_year": {
+    "2018": {
+     "control_mean_m": 0.3841623795487694,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.04660600623691742,
+     "gap_change_mean_m": 0.0,
+     "gap_change_tall_share": 0.0,
+     "gap_mean_m": -0.30315766997263127,
+     "gap_tall_share": -0.03498905176282009,
+     "site_mean_m": 0.08100470957613815,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.011616954474097331,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2019": {
+     "control_mean_m": 0.41138023836985776,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.04873583420296223,
+     "gap_change_mean_m": 0.32034886017420205,
+     "gap_change_tall_share": 0.053443170464096475,
+     "gap_mean_m": 0.017191190201570783,
+     "gap_tall_share": 0.018454118701276383,
+     "site_mean_m": 0.42857142857142855,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.06718995290423861,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2020": {
+     "control_mean_m": 0.430487663474976,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.049730567608306936,
+     "gap_change_mean_m": 3.5210216548493034,
+     "gap_change_tall_share": 0.6185394888640893,
+     "gap_mean_m": 3.217863984876672,
+     "gap_tall_share": 0.5835504371012692,
+     "site_mean_m": 3.6483516483516483,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.6332810047095762,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2021": {
+     "control_mean_m": 0.45776654888534934,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.05217773383863349,
+     "gap_change_mean_m": 7.609284370694818,
+     "gap_change_tall_share": 0.8920734843292102,
+     "gap_mean_m": 7.306126700722186,
+     "gap_tall_share": 0.8570844325663901,
+     "site_mean_m": 7.763893249607535,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.9092621664050236,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2022": {
+     "control_mean_m": 0.4858937038867835,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.05384375972611267,
+     "gap_change_mean_m": 10.715223149759316,
+     "gap_change_tall_share": 0.9208627174684185,
+     "gap_mean_m": 10.412065479786685,
+     "gap_tall_share": 0.8858736657055984,
+     "site_mean_m": 10.89795918367347,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.9397174254317111,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2023": {
+     "control_mean_m": 0.5393713040771865,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.05708427161714359,
+     "gap_change_mean_m": 12.25546611471805,
+     "gap_change_tall_share": 0.933006820962003,
+     "gap_mean_m": 11.95230844474542,
+     "gap_tall_share": 0.898017769199183,
+     "site_mean_m": 12.491679748822605,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.9551020408163265,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    },
+    "2024": {
+     "control_mean_m": 0.5788249940499075,
+     "control_pixels_covered": 163863,
+     "control_tall_share": 0.058536704442125435,
+     "gap_change_mean_m": 13.557927652374842,
+     "gap_change_tall_share": 0.9453691448089206,
+     "gap_mean_m": 13.25476998240221,
+     "gap_tall_share": 0.9103800930461006,
+     "site_mean_m": 13.833594976452119,
+     "site_pixels_covered": 3185,
+     "site_tall_share": 0.968916797488226,
+     "target_mean_m": 26.93395086588804,
+     "target_pixels_covered": 2483,
+     "target_tall_share": 1.0
+    }
+   },
+   "spearman_divergence_vs_mean_gap_change": 0.9642857142857145,
+   "spearman_divergence_vs_tall_gap_change": 0.9642857142857145,
+   "tall_m": 5,
+   "url_template": "https://storage.googleapis.com/earthenginepartners-hansen/Annual_Layers_2015_2024/TCH/{year}/{tile}.tif",
+   "years": [
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024
+   ]
+  },
+  "null_test": {
+   "caveat": "Each half of the control is far larger than the site (half_to_site_pixels gives the ratio), so its mean varies far less than a site-sized piece of land does and the halves test is easy to pass; null_to_site_ratio compares the largest change of the pair with the site's. The site-sized null is the placebo false positive rate.",
+   "divergence": {
+    "2018": 0.0009521179018362469,
+    "2019": 0.0009988396602834682,
+    "2020": 0.0010334883534043326,
+    "2021": 0.0009370853594371509,
+    "2022": 0.0007799607081506732,
+    "2023": 0.0008941463821102724,
+    "2024": 0.001102349144686765,
+    "2025": 0.0009358755272483865
+   },
+   "divergence_change": {
+    "2018": 0.0,
+    "2019": 4.672175844722126e-05,
+    "2020": 8.137045156808576e-05,
+    "2021": -1.5032542399096016e-05,
+    "2022": -0.0001721571936855737,
+    "2023": -5.7971519725974474e-05,
+    "2024": 0.00015023124285051814,
+    "2025": -1.6242374587860375e-05
+   },
+   "half_pixels": [
+    88377,
+    75486
+   ],
+   "half_to_site_pixels": 23.700470957613813,
+   "limitation": "There is no global reference layer for restoration outcomes. The null test (the control pool split into two halves, by alternating angular sectors around the site for the ring or by its median along its long axis for a supplied control, compared exactly as the site is) is a sanity check that the method reports no divergence where none is expected, not an accuracy. Divergence from the control says the site's embeddings moved away from comparable land that started like it; whether that movement is the intended vegetation is for the target trajectory, the canopy check and a site visit to say.",
+   "method": "The control ring split into two halves by 8 alternating angular sectors around the site centroid (main zone metres), compared exactly as the site is, against the same placebo band.",
+   "null_max_abs_change": 0.0001721571936855737,
+   "null_near_zero": true,
+   "null_to_site_ratio": 0.002673649086171763,
+   "null_verdict": "no divergence detected",
+   "null_verdict_detail": "The divergence change stays within the placebo band in every post-planting year.",
+   "sectors": 8,
+   "significant_years": [],
+   "site_max_abs_change": 0.06439034747528338,
+   "site_max_change": 0.06439034747528338,
+   "site_pixels": 3185,
+   "split": "sectors"
+  },
+  "site_sized_null": {
+   "diverging_placebos": 2,
+   "note": "placebo_false_positive_rate is the share of placebos (site-sized pieces of the control, run through the same verdict rule) that the rule calls diverging. They are judged against a band they are part of, so it cannot exceed about 5 percent by construction: it shows how much the run requirement of the verdict removes, not whether the band is calibrated for this site.",
+   "pixels_median": 2127.5,
+   "placebo_false_positive_rate": 0.01,
+   "placebos": 200,
+   "radius_m": 318.4049289027061
+  }
+ }
+}

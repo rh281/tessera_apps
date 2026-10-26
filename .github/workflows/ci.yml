@@ -42,8 +42,10 @@ jobs:
           uv pip compile pyproject.toml --all-extras --python-version 3.12 --no-header -q -o /tmp/lock.txt
           diff requirements-lock.txt /tmp/lock.txt
       - name: ruff
-        run: .venv/bin/ruff check src tests scripts && .venv/bin/ruff format --check src tests scripts
+        run: .venv/bin/ruff check src tests scripts demo && .venv/bin/ruff format --check src tests scripts demo
       - name: mypy
-        run: .venv/bin/mypy src tests scripts
+        # demo/app.py imports Streamlit, which the lock does not hold, so mypy reads those imports as
+        # untyped (mypy.ini ignores missing imports) and checks the rest of the page.
+        run: .venv/bin/mypy src tests scripts demo
       - name: pytest (offline)
         run: .venv/bin/python -m pytest -q

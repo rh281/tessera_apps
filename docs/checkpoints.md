@@ -1040,3 +1040,71 @@ Nothing needs setting up again: the trusted publisher (repository `tessera_apps`
    - send the two texts in `docs/upstream-pointer.md` to the dClimate and geotessera-examples maintainers;
    - file the drafted geotessera issue;
    - decide where notebook 00's bug reports go (checkpoint D).
+
+## Checkpoint 8: the hosted demo and its Dockerfile (2026-10-26)
+
+**Built, run live, containerised; deploying it is the owner's.** The brief's section 7.2 asked for a Streamlit page with a map click and a dropdown of the bundled demos, precomputed outputs committed, a `python:3.12-slim` non-root Dockerfile, and deployment notes for Streamlit Community Cloud and AWS App Runner. All of it is in `demo/`, with one change to the brief: App Runner is closed to new customers, so the AWS notes use ECS instead.
+
+### Built
+
+- **`demo/precompute.py` and `demo/precomputed/`.** The script runs the five bundled demos (Caldor, Rondonia, Everglades, Itapebi, Jaru) with the README's own commands, pinned to snapshot `RC6FS07ZB0T76EXT8XRG`, and copies each run's preview, summary table and validation file beside an `index.json` of headline numbers, labels, warnings and provenance. It refuses any file holding an absolute local path, a credential or a dash. 16 files, 5.1 MB.
+- **`demo/app.py`.** One Streamlit page:
+  - a dropdown that shows a demo's precomputed outputs and headline numbers, each with what it is scored against, the stand-in labels (Hansen outline for NIFC, Sentinel-2 dNBR proxy for MTBS, WorldCover for Global Mangrove Watch), the synthetic label on the restore sites, the run's warnings and its command, reading nothing from the store;
+  - a map on the Caldor AOI; a click runs the clicked pixel's wildfire recovery trajectory and plots its similarity to the pre-fire year and its recovery index, with the bytes read and the wall time of every click.
+- **`demo/trajectory.py`,** the click logic, with no Streamlit import. It reads only the 256 x 256 chunk (2.56 km) that holds the pixel through `TesseraReader`, checks the years before reading, and computes with the wildfire app's own functions: the threshold rule, the cleaning, the unburned reference and the recovery index. Inside the Caldor AOI at the demo's years it takes the precomputed run's threshold and reference, so its verdict and recovery index are that run's; elsewhere it applies the app's rules, and the app's warnings, to the window alone and says so. A least-recently-used cache keyed by snapshot, zone, chunk and year serves repeat clicks. Every failure (ocean, no data, unpublished years, bad years) is a message saying what to change, never a traceback.
+- **`demo/Dockerfile` and `.dockerignore`.** Multi-stage on `python:3.12-slim` pinned by digest; the lock, the package and the page's pinned requirements installed into a venv in a build stage; the final stage runs as uid 10001, with a health check on Streamlit's `/_stcore/health`, `PORT` honoured, and an import check at build time. The proxy CA this environment needs goes in as a BuildKit secret, so nothing of it reaches the image.
+- **`demo/README.md`:** what a click costs, running locally with pip and Docker, refreshing the precomputed outputs, deploying to Streamlit Community Cloud, deploying to AWS, and a list of what could not be checked from here.
+- **CI** runs ruff and mypy on `demo` too; 58 offline tests cover the click logic on a synthetic store and skip themselves when `demo/` is absent (the sdist ships `tests/` without it). The wheel and the sdist hold no demo file.
+
+### Numbers: the checkpoint answer
+
+**Precomputed demos.** Every copied preview, table and validation file is byte-identical to the checkpoint A outputs, and the bytes read are identical to the byte. Total 28,735,764,178 bytes in about 20 minutes:
+
+| Demo | Bytes read | Wall time (checkpoint A) |
+|---|---|---|
+| caldor | 23,025,809,926 | 913.5 s (724.5 s) |
+| rondonia | 1,550,387,529 | 106.0 s (84.7 s) |
+| everglades | 2,368,295,436 | 115.3 s (71.0 s) |
+| itapebi | 766,084,085 | 26.4 s (33.1 s) |
+| jaru | 1,025,187,202 | 44.4 s (44.1 s) |
+
+**A click,** live from the container, outside us-west-2, every AWS_* variable unset: a burned Caldor pixel read 48,444,831 chunk payload bytes in 3.57 s (3.92 s in all, after 2.70 s to open the store); a second click in the same chunk read 0 bytes from the cache in 0.23 s; an ocean click showed a plain error. Clicks whose window needs the app's own threshold rule also read the year before, about 8 MB more (56,031,773 bytes). A repeat of the first click on another day took 9.40 s: click times vary with the network.
+
+**Against the full Caldor run** (the checkpoint A COG): the clicked pixel's similarities to its pre-fire year equal the run's exactly (the 2020 to 2022 distance 0.3967856 equals the COG's band), and inside the Caldor AOI at the demo's years the recovery index equals the COG's band in every year at all four pixels checked. With the window's own rules instead, the window's threshold is 0.275 against the run's 0.244, it marks 29,392 pixels burned where the run marks 33,534 in the same chunk, and its recovery index is 1.11 to 1.15 times the run's, because land within 2.56 km of a large scar is less like its pre-fire self than the whole fire's unburned land. The page says which reference it used.
+
+**The image:** 2.08 GB on disk, 482 MB compressed; 127 of 127 lock pins match its `pip freeze`; `docker history`, `docker inspect` and a search of its 37,315 files found no proxy setting, proxy CA, AWS variable or credential; it runs as uid 10001; healthy about 3 s after start; `docker stop` exits 0 in under a second. Memory in the container: 53 MB idle, 678 MB after the first click, 1,108 MB peak over 41 clicks in 40 chunks, 1,138 MB with 16 simultaneous clicks added, so the deployment notes ask for 2 GB.
+
+**Checks:** 1,276 offline tests pass (1,218 before, plus the 58 for the click logic) in 700 s; ruff, ruff format and mypy clean on `src tests scripts demo` (mypy also clean on `demo` with Streamlit installed, inside the image); `check_dist.py` passes on a fresh build; no dash in any new file.
+
+### How it was checked
+
+Three agents built in sequence (the precomputed outputs, then the page, then the container and the notes), each running its part live with every AWS_* variable unset and driving the page with Playwright. Three reviewers followed: one recomputed the trajectory for burned pixels straight from the store and the full-run COG and drove the page through its failures; one rebuilt the image and read the deployment notes as a deployer; one ran the repository as CI runs it and checked every precomputed number against its report. A skeptic tried to refute each finding; 19 survived (16 confirmed, 3 partly) and all were fixed:
+
+- the click's burned verdict came from the window alone and contradicted the full run for the same pixel (now the precomputed run's settings inside the Caldor AOI at its years);
+- the app's warnings about reference drift, a suspect fallback and a radar-free scar were dropped (now shown);
+- the years between pre-fire and post-fire were all labelled the fire year;
+- a click after panning across the antimeridian was refused;
+- App Runner cannot run the page (below), the memory figure came from too few clicks, the slim image needs `libexpat1`, and the deployment notes left out several things a deployer would hit;
+- the README's status line, install command and Caldor outline command were wrong or did not reproduce the published validation file.
+
+Mutants: five deliberate breaks of the click logic (dropping the radar mask, skipping the cleaning, the wrong reference pixels, the year left out of the cache key, a window one chunk too tall) and nine of the fixes were all caught by the tests, except one equivalent mutant.
+
+### Surprises
+
+- **AWS App Runner is closed to new customers since 2026-04-30,** with no new features planned, and its WebSocket request (aws/apprunner-roadmap issue 13) is closed as not planned. Streamlit's page needs a WebSocket, so on App Runner it would load and never connect, even for an account that can still create services. AWS's own page recommends Amazon ECS Express Mode; the notes document that route, marked untried.
+- **`python:3.12-slim` cannot import rasterio** without the system `libexpat1`: the GDAL inside the rasterio wheel links against it. So the README's "nothing else to install" held only where libexpat is present; it now says so, as does the upstream pointer.
+- **Debian mirrors and Docker Hub are blocked or throttled from this environment,** so the `apt-get install libexpat1` step could not run here. The build used a stand-in runtime stage with the same package's files copied from another Debian image; every other step ran as written, and the `apt-get` line itself is unverified here.
+- **The browser side needs the public internet:** folium loads Leaflet from CDNs and the map tiles from tile servers, both blocked here, so the Playwright runs served Leaflet from local copies and had blank tiles. A normal host loads them. The notes list the hosts.
+- **Precomputing re-read all 28.7 GB** (about 20 minutes), because 0.2.0's code hash makes every earlier output directory non-current. The outputs came back byte-identical.
+
+### Changes to the brief
+
+- **Section 7.2's App Runner target cannot be met as written.** The notes deploy to ECS (Express Mode, or Fargate behind an Application Load Balancer) instead, in us-west-2 next to the store, 1 vCPU and 2 GB, one task, no task role.
+- **Streamlit Community Cloud needs the package from PyPI** (it installs `demo/requirements.txt` alone), so it cannot run the page until 0.2.0 is published, and the repository being private rules out the `git+https` alternative.
+- **"A clean Python 3.12 machine"** (section 10) should read "with the system libexpat", which minimal Debian images lack.
+
+### What is left for the owner
+
+1. Publish 0.2.0 (checkpoint E's steps). Until then neither Community Cloud nor a fresh `pip install -r demo/requirements.txt` can get the package.
+2. Deploy: either connect the repository to Streamlit Community Cloud with entrypoint `demo/app.py`, or build the image and run it on ECS as `demo/README.md` describes. The notes mark what could not be checked from here, chiefly the Express Mode command's options and whether the Community Cloud machines have `libexpat1`.
+3. Optional: a CI job that builds the image, and a constraints-only install in the Dockerfile to drop 166 MB of test tools from it.

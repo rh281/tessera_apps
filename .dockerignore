@@ -1,0 +1,14 @@
+# The build context for demo/Dockerfile, which is built from the repository root. Everything is left
+# out except what the Dockerfile copies: the lock, the package source with the files its build reads
+# (pyproject.toml, README.md, LICENSE), and the demo page. So .git, .venv, the notebooks and their
+# outputs, out/ folders, dist/ and every cache stay out of the context and out of the image.
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!requirements-lock.txt
+!src/
+!demo/
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store

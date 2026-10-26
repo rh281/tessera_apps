@@ -1,0 +1,112 @@
+{
+ "caveats": [
+  "Scored over AOI pixels classified in both years (valid, and in the seeds' radar regime in both years) where the reference has data, leaving out the seed pixels and every pixel within the seed buffer of one, from both recall and precision (survey B6: the seeds would flatter recall). recall_with_seeds gives the recall with them left in.",
+  "Seed buffer: 200 m around every seed pixel centre.",
+  "The seeds come from the same product as the reference (ESA WorldCover), so the score is not independent of the seeds: the buffer leaves the seed stands themselves out, but the reference vector and the threshold were still learned from that product's own map. Seeds from an independent source (Global Mangrove Watch stands, field points) give an honest score.",
+  "ESA WorldCover is itself a model: a 10 m land cover map from Sentinel-1 and Sentinel-2, published for 2020 (v100) and 2021 (v200) only, with its own classification errors, so disagreement at stand edges and between wetland classes is expected.",
+  "false_positive_classes gives the WorldCover class of every extent pixel outside the reference: for mangroves, herbaceous wetland (90) and tree cover (10) are the expected confusions, and permanent water (80) points at tidal edges.",
+  "Reference: ESA WorldCover 2020 v100, tiles from https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif.",
+  "The reference has no map for 2024, so that year's extent is not scored."
+ ],
+ "reference": {
+  "class_names": {
+   "95": "mangroves"
+  },
+  "classes": [
+   95
+  ],
+  "coverage": "class code not 0",
+  "dataset": "ESA WorldCover",
+  "seed_buffer_m": 200.0,
+  "seeds": "demo:everglades_seeds",
+  "source": "worldcover",
+  "url_template": "https://esa-worldcover.s3.eu-central-1.amazonaws.com/{version}/{year}/map/ESA_WorldCover_10m_{year}_{version}_{tile}_Map.tif",
+  "version_mix": null,
+  "versions": {
+   "2020": "v100"
+  },
+  "years_not_covered": [
+   2024
+  ],
+  "years_scored": [
+   2020
+  ]
+ },
+ "scores": {
+  "extent_2020": {
+   "accuracy": 0.9469859240916451,
+   "f1": 0.9165655024479944,
+   "fn": 250722,
+   "fp": 136220,
+   "iou": 0.8459814640561587,
+   "n": 7298854,
+   "precision": 0.9397679327693044,
+   "recall": 0.8944811808316864,
+   "tn": 4786546,
+   "tp": 2125366
+  },
+  "extent_2020_per_zone": {
+   "17N": {
+    "accuracy": 0.9469859240916451,
+    "f1": 0.9165655024479944,
+    "fn": 250722,
+    "fp": 136220,
+    "iou": 0.8459814640561587,
+    "n": 7298854,
+    "precision": 0.9397679327693044,
+    "recall": 0.8944811808316864,
+    "tn": 4786546,
+    "tp": 2125366
+   }
+  },
+  "extent_2020_with_seeds": {
+   "accuracy": 0.946729076604193,
+   "f1": 0.9166231762334934,
+   "fn": 253332,
+   "fp": 136804,
+   "iou": 0.8460797352547459,
+   "n": 7323620,
+   "precision": 0.940033252517938,
+   "recall": 0.8943507520667395,
+   "tn": 4788957,
+   "tp": 2144527
+  },
+  "false_positive_classes_2020": {
+   "10": {
+    "name": "tree cover",
+    "pixels": 46988,
+    "share": 0.3449420055792101
+   },
+   "20": {
+    "name": "shrubland",
+    "pixels": 1,
+    "share": 7.341065922771986e-06
+   },
+   "30": {
+    "name": "grassland",
+    "pixels": 299,
+    "share": 0.0021949787109088238
+   },
+   "50": {
+    "name": "built-up",
+    "pixels": 480,
+    "share": 0.0035237116429305535
+   },
+   "60": {
+    "name": "bare or sparse vegetation",
+    "pixels": 296,
+    "share": 0.002172955513140508
+   },
+   "80": {
+    "name": "permanent water bodies",
+    "pixels": 31568,
+    "share": 0.23174276905006608
+   },
+   "90": {
+    "name": "herbaceous wetland",
+    "pixels": 56588,
+    "share": 0.41541623843782116
+   }
+  }
+ }
+}
